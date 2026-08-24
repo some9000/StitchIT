@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Stitch 360 - WebGL2 Dual-Fisheye Stitcher</title>
+  
+  <style>
+    :root {
+      --bg-color: #121214;
+      --card-bg: #1e1e24;
+      --accent: #3b82f6;
+      --accent-hdr: #f59e0b;
+      --text: #e4e4e7;
+      --text-dim: #a1a1aa;
+      --border: #27272a;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* Floating UI panel overlay */
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg-color);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      padding: 1rem 1.5rem;
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      flex-shrink: 0;
+    }
+
+    h1 { font-size: 1.25rem; font-weight: 600; }
+
+    .toolbar {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    button, .btn {
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s ease, opacity 0.2s ease;
+    }
+
+    button:hover { background: #3f3f46; }
+    button.primary { background: var(--accent); color: #fff; }
+    button.primary:hover { background: #2563eb; }
+    button.hdr-btn { background: var(--accent-hdr); color: #000; }
+    button.hdr-btn:hover { background: #d97706; color: #fff; }
+    button.active { background: #10b981; color: #fff; }
+    button.active:hover { background: #059669; }
+
+    .control-header button {
+      padding: 0.25rem 0.6rem;
+      font-size: 0.75rem;
+    }
+    .header-btns {
+      display: flex;
+      gap: 4px;
+    }
+    button.mini {
+      padding: 0.2rem 0.5rem;
+      font-size: 0.7rem;
+    }
+    @keyframes btn-flash {
+      0% { background: #10b981; color: #fff; }
+      100% { background: var(--btn-bg); }
+    }
+    button.flash {
+      animation: btn-flash 0.3s ease-out;
+    }
+    .toggle-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    button.toggle-btn {
+      flex: 1;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.75rem;
+      background: var(--btn-bg, #27272a);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button.toggle-btn.active {
+      background: #10b981;
+      color: #fff;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .hidden { display: none !important; }
+
+    main {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      height: 100%;
+    }
+
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+    }
+
+    .viewport {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #000;
+      position: relative;
+      padding: 0;
+      min-height: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    canvas#panoramaCanvas {
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      border-radius: 0;
+      box-shadow: none;
+      object-fit: contain;
+    }
+
+    /* In 3D mode the same canvas hosts the spherical view and should fill the
+       viewport instead of letterboxing the equirect strip. */
+    canvas#panoramaCanvas.viewer-3d {
+      width: 100%;
+      height: 100%;
+      max-width: none;
+      max-height: none;
+      object-fit: fill;
+    }
+
+    .float-btn {
+      position: absolute;
+      z-index: 5;
+      background: rgba(20,20,20,0.7);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      padding: 0.4rem 0.8rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+    }
+    .float-btn:hover { background: rgba(40,40,40,0.85); }
+    .float-tr { top: 12px; right: 12px; }
+    .float-tl { top: 12px; left: 12px; }
+
+    #panoramaViewerContainer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      background: var(--card-bg);
+      border-left: 1px solid var(--border);
+      padding: 1rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .control-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.35rem;
+    }
+
+    .control-group h3 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-dim);
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      gap: 0.5rem;
+    }
+
+    .control-row label { flex: 1; }
+    .control-row input[type="range"] { flex: 1.5; }
+    .control-row span { width: 45px; text-align: right; font-family: monospace; color: var(--text-dim); }
+
+    .loader-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      gap: 1rem;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>StitchIT</h1>
+    <div class="toolbar">
+      <!-- Hidden File Inputs -->
+      <input type="file" id="imageLoader" accept="image/*" class="hidden">
+      <input type="file" id="hdrImageLoader" accept="image/*" multiple class="hidden">
+      <input type="file" id="blendImageLoader" accept="image/*" multiple class="hidden">
+
+      <!-- File & Processing Action Buttons -->
+      <button id="chooseBtn">Open Single File</button>
+      <button id="hdrBtn" class="hdr-btn">HDR Exposure Merge</button>
+      <button id="blendBtn" class="primary">Merge Files (Noise Reduction)</button>
+      <button id="x2Btn">HD</button>
+
+      <!-- Export & Preview Action Buttons -->
+      <div id="actions" class="toolbar hidden">
+        <button id="downloadBtn">Export PNG</button>
+        <button id="downloadJpgBtn" class="primary">Export JPG (XMP)</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="viewport" id="resultContainer">
+      <div id="loader" class="loader-overlay hidden">
+        <div class="spinner"></div>
+        <p id="loaderMsg">Processing image...</p>
+      </div>
+      <canvas id="panoramaCanvas"></canvas>
+      <div id="panoramaViewerContainer" class="hidden"></div>
+      <button id="viewModeBtn" class="float-btn float-tr">2D</button>
+      <button id="snapViewBtn" class="float-btn float-tl">Snap 30°</button>
+    </div>
+
+    <!-- ...existing sidebar with all control groups... -->
+    <aside class="sidebar">
+      <!-- 1. Post-Processing -->
+      <div class="control-group" id="ppControlGroup">
+        <div class="control-header">
+          <h3>Processing</h3>
+          <div style="display: flex; gap: 0.3rem;">
+            <button id="enablePostBtn" class="active">ON</button>
+            <div class="header-btns">
+              <button id="saveProcBtn" class="mini">Save</button>
+              <button id="loadProcBtn" class="mini">Load</button>
+            </div>
+          </div>
+        </div>
+        <div class="control-row">
+          <label for="exposure">Exposure</label>
+          <input type="range" id="exposure" min="0.2" max="3.0" step="0.05" value="1.0">
+          <span id="exposureVal">1.00</span>
+        </div>
+        <div class="control-row">
+          <label for="gammaPP">Gamma</label>
+          <input type="range" id="gammaPP" min="0.2" max="2.5" step="0.05" value="1.0">
+          <span id="gammaPPVal">1.00</span>
+        </div>
+        <div class="control-row">
+          <label for="contrast">Contrast</label>
+          <input type="range" id="contrast" min="0.5" max="2.0" step="0.05" value="1.0">
+          <span id="contrastVal">1.00</span>
+        </div>
+        <div class="control-row">
+          <label for="saturation">Saturation</label>
+          <input type="range" id="saturation" min="0.0" max="2.0" step="0.05" value="1.0">
+          <span id="saturationVal">1.00</span>
+        </div>
+        <div class="control-row">
+          <label for="sharpen">Sharpen (CAS)</label>
+          <input type="range" id="sharpen" min="0.0" max="2.0" step="0.02" value="0.2">
+          <span id="sharpenVal">0.20</span>
+        </div>
+        <div class="control-row">
+          <label for="grain">Film Grain</label>
+          <input type="range" id="grain" min="0.0" max="0.5" step="0.005" value="0">
+          <span id="grainVal">0.00</span>
+        </div>
+      </div>
+
+      <!-- 1c. Watermark (nadir decal) -->
+      <div class="control-group" id="wmControlGroup">
+        <div class="control-header">
+          <h3>Watermark</h3>
+          <div class="header-btns">
+            <button id="wmRemoveBtn">Remove</button>
+            <button id="wmBtn">Load</button>
+          </div>
+        </div>
+        <input type="file" id="wmImageLoader" accept="image/*" class="hidden">
+        <div class="control-row">
+          <label for="wmSize">Size</label>
+          <input type="range" id="wmSize" min="0.05" max="1.0" step="0.01" value="0.3">
+          <span id="wmSizeVal">0.30</span>
+        </div>
+        <div class="control-row">
+          <label for="wmRot">Rotation</label>
+          <input type="range" id="wmRot" min="0" max="360" step="1" value="0">
+          <span id="wmRotVal">0</span>
+        </div>
+      </div>
+
+      <!-- 1b. HDR Settings -->
+      <div class="control-group">
+          <div class="control-header">
+            <h3>HDR Settings</h3>
+            <div class="header-btns">
+              <button id="saveHdrBtn" class="mini">Save</button>
+              <button id="loadHdrBtn" class="mini">Load</button>
+            </div>
+          </div>
+        <canvas id="hdrBellChart" width="300" height="70" style="width:100%; height:auto; border-radius:4px; display:block; background:#0e0e10;"></canvas>
+        <div class="control-row">
+          <label for="hdrSigma">Bell Width (σ)</label>
+          <input type="range" id="hdrSigma" min="0.05" max="0.5" step="0.01" value="0.18">
+          <span id="hdrSigmaVal">0.18</span>
+        </div>
+        <div class="control-row">
+          <label for="hdrBellCenter">Bell Center</label>
+          <input type="range" id="hdrBellCenter" min="0.0" max="1.0" step="0.01" value="0.33">
+          <span id="hdrBellCenterVal">0.33</span>
+        </div>
+        <div class="control-row">
+          <label for="hdrBase">Base Weight</label>
+          <input type="range" id="hdrBase" min="0.05" max="0.95" step="0.01" value="0.02">
+          <span id="hdrBaseVal">0.02</span>
+        </div>
+      </div>
+
+      <!-- 2. Lens Geometry & Alignment -->
+      <div class="control-group">
+        <div class="control-header">
+          <h3>Lens Geometry</h3>
+          <div class="header-btns">
+            <button id="saveGeoBtn" class="mini">Save</button>
+            <button id="loadGeoBtn" class="mini">Load</button>
+          </div>
+        </div>
+        <div class="control-row">
+          <label for="fovDeg">FOV (°)</label>
+          <input type="range" id="fovDeg" min="140" max="220" step="0.1" value="190">
+          <span id="fovDegVal">190.0</span>
+        </div>
+        <div class="control-row">
+          <label for="radiusScale">Radius Scale</label>
+          <input type="range" id="radiusScale" min="0.25" max="1.0" step="0.001" value="0.97">
+          <span id="radiusScaleVal">0.970</span>
+        </div>
+        <div class="control-row">
+          <label for="blendGamma">Smoothness</label>
+          <input type="range" id="blendGamma" min="0.01" max="0.45" step="0.005" value="0.15">
+          <span id="blendGammaVal">0.150</span>
+        </div>
+        <div class="control-row toggle-row">
+          <button id="mirror3DBtn" class="toggle-btn">Mirror</button>
+          <button id="diffBtn" class="toggle-btn">Difference</button>
+        </div>
+      </div>
+
+      <!-- 3. Left Lens Calibration -->
+      <div class="control-group">
+        <div class="control-header">
+          <h3>Left Lens Calibration</h3>
+        </div>
+        <div class="control-row">
+          <label for="centerLx">Center X</label>
+          <input type="range" id="centerLx" min="0.1" max="0.4" step="0.0005" value="0.25">
+          <span id="centerLxVal">0.2500</span>
+        </div>
+        <div class="control-row">
+          <label for="centerLy">Center Y</label>
+          <input type="range" id="centerLy" min="0.3" max="0.7" step="0.0005" value="0.50">
+          <span id="centerLyVal">0.5000</span>
+        </div>
+        <div class="control-row">
+          <label for="rollL">Roll (°)</label>
+          <input type="range" id="rollL" min="-15" max="15" step="0.05" value="0">
+          <span id="rollLVal">0.00</span>
+        </div>
+        <div class="control-row">
+          <label for="stretchL">Stretch X</label>
+          <input type="range" id="stretchL" min="0.8" max="1.2" step="0.001" value="1.0">
+          <span id="stretchLVal">1.000</span>
+        </div>
+      </div>
+
+      <!-- 4. Right Lens Calibration -->
+      <div class="control-group">
+        <div class="control-header">
+          <h3>Right Lens Calibration</h3>
+        </div>
+        <div class="control-row">
+          <label for="centerRx">Center X</label>
+          <input type="range" id="centerRx" min="0.6" max="0.9" step="0.0005" value="0.75">
+          <span id="centerRxVal">0.7500</span>
+        </div>
+        <div class="control-row">
+          <label for="centerRy">Center Y</label>
+          <input type="range" id="centerRy" min="0.3" max="0.7" step="0.0005" value="0.50">
+          <span id="centerRyVal">0.5000</span>
+        </div>
+        <div class="control-row">
+          <label for="rollR">Roll (°)</label>
+          <input type="range" id="rollR" min="-15" max="15" step="0.05" value="0">
+          <span id="rollRVal">0.00</span>
+        </div>
+        <div class="control-row">
+          <label for="stretchR">Stretch X</label>
+          <input type="range" id="stretchR" min="0.8" max="1.2" step="0.001" value="1.0">
+          <span id="stretchRVal">1.000</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="stitcher.js"></script>
+</body>
+</html>
