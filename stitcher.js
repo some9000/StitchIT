@@ -50,11 +50,16 @@ document.addEventListener('DOMContentLoaded', () => {
     lfTex = lfFbo = lfTmpTex = lfTmpFbo = lfProg = null;
     glProgram = null;
     postProgram = null;
+    sphereProgram = null;
     sphere = null;
     _quadVAO = null;
+    panoFullTex = null; panoFullFbo = null; panoFullW = 0; panoFullH = 0;
+    panoWMTex = null; panoWMFbo = null;
+    wmTex = null; wmFbo = null; wmFboTex = null; wmFboW = 0; wmFboH = 0;
     fboPool.clear();
     postFboPool.clear();
     lfPool.clear();
+    wmFbo = null; wmFboTex = null; wmFboW = 0; wmFboH = 0;
     if (currentImg) {
       uploadTexture(currentImg);
       renderPano();
@@ -188,6 +193,28 @@ document.addEventListener('DOMContentLoaded', () => {
       lfPool.set(key, { lfTex, lfFbo, lfTmpTex, lfTmpFbo, width: lfW, height: lfH });
     }
     return lfPool.get(key);
+  }
+
+  // Drops every cached FBO/texture in the size-keyed pools. Called when a new
+  // source image is loaded: those pools are keyed by source dimensions, so a
+  // different image would otherwise keep every previous size's textures alive
+  // (several full-resolution RGBA8 surfaces each) until the page reloads —
+  // repeated loads OOM the browser and trigger a context loss / blank screen.
+  function resetPools() {
+    function clearMap(map) {
+      map.forEach(entry => {
+        if (entry.tex) gl.deleteTexture(entry.tex);
+        if (entry.fbo) gl.deleteFramebuffer(entry.fbo);
+        if (entry.lfTex) gl.deleteTexture(entry.lfTex);
+        if (entry.lfFbo) gl.deleteFramebuffer(entry.lfFbo);
+        if (entry.lfTmpTex) gl.deleteTexture(entry.lfTmpTex);
+        if (entry.lfTmpFbo) gl.deleteFramebuffer(entry.lfTmpFbo);
+      });
+      map.clear();
+    }
+    clearMap(fboPool);
+    clearMap(postFboPool);
+    clearMap(lfPool);
   }
 
   // Precomputed low-frequency (blurred source) texture used by the stitch shader
@@ -900,7 +927,7 @@ const sliderMap = [
       const fullH0 = Math.round(fullW0 / 2);
       const { w, h } = clampToGpuLimits(fullW0, fullH0);
       if (postEnabled) stitchIfNeeded(w, h);
-      else { stitchWebGL(currentImg.width, currentImg.height, w, h, true); _fboValid = false; }
+      else stitchIfNeeded(w, h);
       panoFullDirty = true;
       scheduleViewerUpdate();
       return;
@@ -1403,6 +1430,11 @@ const sliderMap = [
   }
 
   function uploadTexture(img) {
+    // New source: drop the size-keyed FBO/texture pools so a different image
+    // doesn't accumulate several full-resolution RGBA8 surfaces per size.
+    resetPools();
+    renderTexture = null;
+    framebuffer = null;
     // Recreate texture at correct size — texStorage2D allocates immutable storage
     // so we must re-create if dimensions change.
     if (currentTexture) gl.deleteTexture(currentTexture);
@@ -1422,6 +1454,13 @@ const sliderMap = [
     _stitchDirty = true;
     _fboValid = false;
     panoFullDirty = true; // full-res sphere texture must be rebuilt for the new source
+    // A new source invalidates the cached watermarked full-res texture — its
+    // pixels now belong to the previous image.
+    if (panoWMTex) { gl.deleteTexture(panoWMTex); panoWMTex = null; }
+    if (panoWMFbo) { gl.deleteFramebuffer(panoWMFbo); panoWMFbo = null; }
+    if (panoFullTex) { gl.deleteTexture(panoFullTex); panoFullTex = null; }
+    if (panoFullFbo) { gl.deleteFramebuffer(panoFullFbo); panoFullFbo = null; }
+    panoFullW = 0; panoFullH = 0;
   }
 
   // VAO for the fullscreen quad — core in WebGL2, avoids re-binding every draw.
@@ -1906,8 +1945,7 @@ const SPHERE_FS = `#version 300 es
     }
 
     // Ensure the shared stitch FBO is at full resolution.
-    if (postEnabled) stitchIfNeeded(w, h);
-    else { stitchWebGL(currentImg.width, currentImg.height, w, h, true); _fboValid = false; }
+    stitchIfNeeded(w, h);
 
     if (postEnabled) renderWithPostProcessing(w, h, panoFullFbo);
 
@@ -1938,8 +1976,9 @@ const SPHERE_FS = `#version 300 es
   // on the GPU. While it's being rebuilt (e.g. mid-drag) the fresher (pre-post)
   // stitch FBO is used so interaction stays responsive.
   function getSphereSourceTexture() {
+    if (panoFullDirty) return renderTexture;
     if (wmLoaded && panoWMTex) return panoWMTex;
-    if (postEnabled && panoFullTex && !panoFullDirty) return panoFullTex;
+    if (postEnabled && panoFullTex) return panoFullTex;
     return renderTexture;
   }
 
@@ -1982,12 +2021,12 @@ const SPHERE_FS = `#version 300 es
       if (!sphere) sphere = initSphereViewer();
       panoFullDirty = true;
       refreshSphereFromTexture();
-      if (viewModeBtn) viewModeBtn.textContent = '3D';
+      if (viewModeBtn) viewModeBtn.textContent = '2D';
     } else {
       if (viewerContainer) viewerContainer.classList.add('hidden');
       panoramaCanvas.classList.remove('viewer-3d');
       panoramaCanvas.style.cursor = '';
-      if (viewModeBtn) viewModeBtn.textContent = '2D';
+      if (viewModeBtn) viewModeBtn.textContent = '3D';
       renderPano(); // redraw the equirect onto the canvas
     }
   }
