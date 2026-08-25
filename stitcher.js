@@ -31,7 +31,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const MAX_TEX_SIZE = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-  const MAX_HDR_FRAMES = 12; // hard cap on fused exposures (GPU sampler-array size)
+  const MAX_HDR_FRAMES = 64;    // max frames accepted (processed in MERGE_BATCH chunks)
+  const MERGE_BATCH = 4;        // frames decoded/held in memory at once per merge pass
   console.log('📐 GPU MAX_TEXTURE_SIZE:', MAX_TEX_SIZE);
   console.log('🔧 WebGL2 active — using optimized pipeline');
 
@@ -60,6 +61,8 @@ document.addEventListener('DOMContentLoaded', () => {
     postFboPool.clear();
     lfPool.clear();
     wmFbo = null; wmFboTex = null; wmFboW = 0; wmFboH = 0;
+    // Clear seam mask on context restore
+    seamMaskTex = null;
     if (currentImg) {
       uploadTexture(currentImg);
       renderPano();
@@ -112,7 +115,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastBaseName = 'panorama';
   let glProgram = null;
   let postProgram = null;
-  let hdrFuseProgram = null;
   let sphereProgram = null;
 
   let currentImg = null;
@@ -128,6 +130,8 @@ document.addEventListener('DOMContentLoaded', () => {
     saturation: 1,
     contrast: 1,
   };
+
+  let seamCarveEnabled = false;
 
   let framebuffer = null;
   let renderTexture = null;
@@ -266,6 +270,314 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   let cfg = JSON.parse(JSON.stringify(DEFAULT_CFG));
+
+  // ===========================================================================
+  //  SEAM CARVING FOR OPTIMAL BLEND MASK
+  // ===========================================================================
+
+  /**
+   * Seam Carving implementation for finding optimal blend seam between
+   * two fisheye images in their overlap region.
+   * 
+   * Based on: https://shwestrick.github.io/2020/07/29/seam-carve.html
+   * and https://github.com/shwestrick/mpl-seam-carve
+   * 
+   * The algorithm:
+   * 1. Compute energy map from difference between left/right lens in overlap
+   * 2. Find minimum energy path (seam) using dynamic programming
+   * 3. Generate blend mask where left=1, right=0, transition at seam
+   */
+
+  function computeSeamCarvingBlendMask(srcW, srcH, cfg) {
+    const canvas = document.createElement('canvas');
+    canvas.width = srcW;
+    canvas.height = srcH;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    // We need the source image data - this will be called after uploadTexture
+    // so we need to access the current image. We'll pass the image data directly.
+    return null; // Placeholder - will be implemented with image data parameter
+  }
+
+  /**
+   * Compute energy map for seam carving.
+   * Energy = gradient magnitude of the difference between left and right lens views
+   * in the overlap region.
+   */
+  function computeSeamEnergyMap(imgData, srcW, srcH, cfg) {
+    const cxL = srcW * cfg.centers.left[0];
+    const cyL = srcH * cfg.centers.left[1];
+    const cxR = srcW * cfg.centers.right[0];
+    const cyR = srcH * cfg.centers.right[1];
+    const radius = Math.min(srcW * 0.25, srcH * 0.5) * cfg.radiusScale;
+    const fovRad = (cfg.fovDeg * Math.PI) / 180.0;
+    const halfFov = fovRad / 2.0;
+    const f = radius / halfFov;
+    
+    // Lens basis vectors (same as shader)
+    const AXIS_R = [1,0,0], AXIS_L = [-1,0,0];
+    const UP = [0,0,1], RIGHT = [0,1,0];
+    
+    function rotateAroundAxis(v, axis, ang) {
+      const c = Math.cos(ang), s = Math.sin(ang);
+      const [ax, ay, az] = axis;
+      const dot = v[0] * ax + v[1] * ay + v[2] * az;
+      return [
+        v[0] * c + s * (ay * v[2] - az * v[1]) + (1 - c) * ax * dot,
+        v[1] * c + s * (az * v[0] - ax * v[2]) + (1 - c) * ay * dot,
+        v[2] * c + s * (ax * v[1] - ay * v[0]) + (1 - c) * az * dot
+      ];
+    }
+    
+    function lensBasis(isRight) {
+      const AXIS = isRight ? AXIS_R : AXIS_L;
+      let up = [...UP];
+      let right = isRight ? [...RIGHT] : [0,-1,0];
+      const totalRoll = (isRight ? cfg.rollDeg.right : cfg.rollDeg.left) * Math.PI / 180.0;
+      if (totalRoll !== 0) {
+        up = rotateAroundAxis(up, AXIS, totalRoll);
+        right = rotateAroundAxis(right, AXIS, totalRoll);
+      }
+      return { AXIS, up, right };
+    }
+    
+    const Rb = lensBasis(true), Lb = lensBasis(false);
+    
+    function mapLens(v, axis, up, right, center, stretch) {
+      const dotAxis = v[0]*axis[0] + v[1]*axis[1] + v[2]*axis[2];
+      const theta = Math.acos(Math.max(-1, Math.min(1, dotAxis)));
+      if (theta > halfFov) return null;
+      const vu = v[0]*up[0] + v[1]*up[1] + v[2]*up[2];
+      const vr = v[0]*right[0] + v[1]*right[1] + v[2]*right[2];
+      const az = Math.atan2(vr, vu);
+      const dist = f * theta;
+      const d = [dist * Math.sin(az) / stretch, -dist * Math.cos(az)];
+      const s = [center[0] + d[0], center[1] + d[1]];
+      const d2 = d[0]*d[0] + d[1]*d[1];
+      if (d2 > radius * radius) return null;
+      const w = Math.max(0, Math.min(1, 1.0 - (theta / halfFov)));
+      return { sx: s[0], sy: s[1], w };
+    }
+    
+    // For each pixel in the output equirectangular, determine if it's in overlap
+    // and compute energy based on difference between left/right samples
+    const panoW = srcW; // Use source width as reference for energy map resolution
+    const panoH = srcH;
+    
+    // Actually, we need to compute this in the equirectangular output space
+    // where the overlap occurs. Let's compute at a reasonable resolution.
+    const energyW = Math.min(1024, srcW);
+    const energyH = Math.min(512, srcH);
+    const energy = new Float32Array(energyW * energyH);
+    
+    const scaleX = srcW / energyW;
+    const scaleY = srcH / energyH;
+    
+    for (let py = 0; py < energyH; py++) {
+      for (let px = 0; px < energyW; px++) {
+        const vLat = (py / energyH) * Math.PI - Math.PI/2;
+        const vLon = (px / energyW) * 2 * Math.PI;
+        const cosLat = Math.cos(vLat);
+        const v = [
+          cosLat * Math.cos(vLon),
+          cosLat * Math.sin(vLon),
+          Math.sin(vLat)
+        ];
+        
+        const resL = mapLens(v, Lb.AXIS, Lb.up, Lb.right, [cxL, cyL], cfg.stretch.left);
+        const resR = mapLens(v, Rb.AXIS, Rb.up, Rb.right, [cxR, cyR], cfg.stretch.right);
+        
+        if (resL && resR) {
+          // In overlap region - compute energy from difference
+          const idxL = (Math.floor(resL.sy) * srcW + Math.floor(resL.sx)) * 4;
+          const idxR = (Math.floor(resR.sy) * srcW + Math.floor(resR.sx)) * 4;
+          
+          if (idxL >= 0 && idxL < imgData.length && idxR >= 0 && idxR < imgData.length) {
+            const dr = imgData[idxL] - imgData[idxR];
+            const dg = imgData[idxL+1] - imgData[idxR+1];
+            const db = imgData[idxL+2] - imgData[idxR+2];
+            // Energy = color difference magnitude + gradient
+            energy[py * energyW + px] = Math.sqrt(dr*dr + dg*dg + db*db) / 255.0;
+          }
+        } else {
+          energy[py * energyW + px] = 0;
+        }
+      }
+    }
+    
+    // Compute gradients for smoother seam finding
+    const gradEnergy = new Float32Array(energyW * energyH);
+    for (let y = 1; y < energyH - 1; y++) {
+      for (let x = 1; x < energyW - 1; x++) {
+        const idx = y * energyW + x;
+        const dx = energy[y * energyW + x + 1] - energy[y * energyW + x - 1];
+        const dy = energy[(y + 1) * energyW + x] - energy[(y - 1) * energyW + x];
+        gradEnergy[idx] = Math.sqrt(dx*dx + dy*dy) + energy[idx] * 0.1;
+      }
+    }
+    
+    return { energy: gradEnergy, width: energyW, height: energyH };
+  }
+
+  /**
+   * Find minimum energy vertical seam using dynamic programming.
+   * Returns array of x-coordinates for each row (top to bottom).
+   */
+  function findMinEnergySeam(energyMap) {
+    const { energy, width, height } = energyMap;
+    const dp = new Float32Array(width * height);
+    const backtrack = new Int32Array(width * height);
+    
+    // Initialize first row
+    for (let x = 0; x < width; x++) {
+      dp[x] = energy[x];
+    }
+    
+    // Dynamic programming: find min cost path
+    for (let y = 1; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let minCost = dp[(y-1)*width + x];
+        let bestX = x;
+        
+        if (x > 0) {
+          const cost = dp[(y-1)*width + x - 1];
+          if (cost < minCost) { minCost = cost; bestX = x - 1; }
+        }
+        if (x < width - 1) {
+          const cost = dp[(y-1)*width + x + 1];
+          if (cost < minCost) { minCost = cost; bestX = x + 1; }
+        }
+        
+        dp[y*width + x] = energy[y*width + x] + minCost;
+        backtrack[y*width + x] = bestX;
+      }
+    }
+    
+    // Find minimum in last row
+    let minCost = dp[(height-1)*width];
+    let minX = 0;
+    for (let x = 1; x < width; x++) {
+      if (dp[(height-1)*width + x] < minCost) {
+        minCost = dp[(height-1)*width + x];
+        minX = x;
+      }
+    }
+    
+    // Backtrack to get seam path
+    const seam = new Int32Array(height);
+    seam[height-1] = minX;
+    for (let y = height - 2; y >= 0; y--) {
+      seam[y] = backtrack[(y+1)*width + seam[y+1]];
+    }
+    
+    return seam;
+  }
+
+  /**
+   * Generate blend mask texture from seam.
+   * Left of seam = 1.0 (use left lens), Right of seam = 0.0 (use right lens)
+   * With smooth transition zone around seam.
+   */
+  function generateSeamBlendMask(seam, energyW, energyH, panoW, panoH, transitionWidth = 0.02) {
+    const canvas = document.createElement('canvas');
+    canvas.width = panoW;
+    canvas.height = panoH;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(panoW, panoH);
+    const data = imgData.data;
+    
+    const scaleX = panoW / energyW;
+    const scaleY = panoH / energyH;
+    const transPixels = transitionWidth * panoW;
+    
+    for (let py = 0; py < panoH; py++) {
+      const energyY = Math.min(energyH - 1, Math.floor(py / scaleY));
+      const seamX = seam[energyY] * scaleX;
+      
+      for (let px = 0; px < panoW; px++) {
+        const idx = (py * panoW + px) * 4;
+        const dist = px - seamX;
+        
+        // Smooth transition
+        let blend = 0.5;
+        if (dist < -transPixels) blend = 1.0;
+        else if (dist > transPixels) blend = 0.0;
+        else blend = 0.5 + 0.5 * Math.cos(Math.PI * dist / transPixels);
+        
+        // Store in red channel (we only need one channel)
+        data[idx] = Math.round(blend * 255);
+        data[idx+1] = 0;
+        data[idx+2] = 0;
+        data[idx+3] = 255;
+      }
+    }
+    
+    ctx.putImageData(imgData, 0, 0);
+    return canvas;
+  }
+
+  /**
+   * Main function to compute and upload seam carving blend mask.
+   * Called when geometry/lens settings change.
+   */
+  let seamMaskTex = null;
+  let seamMaskDirty = true;
+  let lastSeamConfig = null;
+
+  function buildSeamMaskTexture(img) {
+    if (!img) return;
+    
+    // Create config signature to detect changes
+    const configSig = JSON.stringify({
+      fovDeg: cfg.fovDeg,
+      radiusScale: cfg.radiusScale,
+      centers: cfg.centers,
+      rollDeg: cfg.rollDeg,
+      stretch: cfg.stretch,
+      blend: cfg.blend
+    });
+    
+    if (!seamMaskDirty && lastSeamConfig === configSig && seamMaskTex) {
+      return; // No change needed
+    }
+    
+    const srcW = img.width;
+    const srcH = img.height;
+    
+    // Get image data
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = srcW;
+    tempCanvas.height = srcH;
+    const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+    tempCtx.drawImage(img, 0, 0);
+    const imgData = tempCtx.getImageData(0, 0, srcW, srcH).data;
+    
+    // Compute energy map in equirectangular space
+    const panoW = Math.min(2048, srcW);
+    const panoH = Math.min(1024, srcH);
+    
+    const energyMap = computeSeamEnergyMap(imgData, srcW, srcH, cfg);
+    const seam = findMinEnergySeam(energyMap);
+    const maskCanvas = generateSeamBlendMask(seam, energyMap.width, energyMap.height, panoW, panoH, cfg.blend.hfBandWidth);
+    
+    // Upload to GPU
+    if (seamMaskTex) gl.deleteTexture(seamMaskTex);
+    seamMaskTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, seamMaskTex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, panoW, panoH);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, panoW, panoH, gl.RED, gl.UNSIGNED_BYTE, maskCanvas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    
+    seamMaskDirty = false;
+    lastSeamConfig = configSig;
+  }
+
+  function markSeamMaskDirty() {
+    seamMaskDirty = true;
+  }
 
 const sliderMap = [
      { id: 'fovDeg',       get: () => cfg.fovDeg,             set: v => cfg.fovDeg = v },
@@ -689,6 +1001,24 @@ const sliderMap = [
       });
     }
 
+    if (seamBtn) {
+      seamBtn.addEventListener('click', () => {
+        seamCarveEnabled = !seamCarveEnabled;
+        seamBtn.classList.toggle('active', seamCarveEnabled);
+        if (!seamCarveEnabled && seamMaskTex) {
+          gl.deleteTexture(seamMaskTex);
+          seamMaskTex = null;
+        } else {
+          markSeamMaskDirty();
+        }
+        if (currentImg) {
+          markStitchDirty();
+          renderPano();
+          if (sphere) renderSphere();
+        }
+      });
+    }
+
     if (snapViewBtn) {
       snapViewBtn.addEventListener('click', () => {
         if (viewMode !== '3d') setViewMode('3d');
@@ -962,6 +1292,7 @@ const sliderMap = [
   function markStitchDirty() {
     _stitchDirty = true;
     _fboValid = false;
+    if (seamCarveEnabled) markSeamMaskDirty();
   }
 
   // Separable Gaussian blur used to precompute the low-frequency source layer.
@@ -1056,6 +1387,12 @@ const sliderMap = [
     const needRealloc = !renderTexture || renderTexture.width !== panoW || renderTexture.height !== panoH;
     if (needRealloc || !_fboValid || _stitchDirty) {
       if (needRealloc) allocateStitchTarget(panoW, panoH);
+      
+      // Build seam mask if seam carving is enabled
+      if (seamCarveEnabled && currentImg) {
+        buildSeamMaskTexture(currentImg);
+      }
+      
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.viewport(0, 0, panoW, panoH);
       stitchWebGL(currentImg.width, currentImg.height, panoW, panoH, true);
@@ -1133,9 +1470,11 @@ const sliderMap = [
   uniform vec3 u_axisR;
   uniform vec3 u_upR;
   uniform vec3 u_rightR;
-  uniform float u_stretchL;
+uniform float u_stretchL;
   uniform float u_stretchR;
   uniform int u_diffMode;
+  uniform sampler2D u_seamMask;
+  uniform int u_useSeamMask;
 
   #define PI 3.14159265358979323846
 
@@ -1177,6 +1516,12 @@ const sliderMap = [
       return texture(u_imageLF, texCoord).rgb;
   }
 
+  float getSeamBlend(vec2 v_uv) {
+      if (u_useSeamMask == 0) return -1.0;
+      float mask = texture(u_seamMask, v_uv).r;
+      return mask;
+  }
+
   void main() {
       float pxNorm = v_uv.x;
       float pyNorm = 1.0 - v_uv.y;
@@ -1193,7 +1538,7 @@ const sliderMap = [
       // Bright = misaligned, dark = well aligned. Helps tune stretch/center/roll.
       // Softened: threshold suppresses high-frequency noise (grass, dirt, texture)
       // and shows only strong differences (edges, lines, misalignment).
-                  if (u_diffMode == 1 && resL.hit && resR.hit) {
+      if (u_diffMode == 1 && resL.hit && resR.hit) {
           vec2 texel = 1.0 / u_srcSize;
           vec3 blurredDiff = vec3(0.0);
           float total = 0.0;
@@ -1224,6 +1569,13 @@ const sliderMap = [
       float w = smoothstep(0.5 - halfW, 0.5 + halfW, ratio);
       float wHF = w;
       float wLF = w;
+
+      // Use seam carving mask if enabled
+      float seamBlend = getSeamBlend(v_uv);
+      if (seamBlend >= 0.0) {
+          wLF = seamBlend;
+          wHF = seamBlend;
+      }
 
       vec3 colorL_raw = resL.hit ? sampleSource(resL.sxsy).rgb : vec3(0.0);
       vec3 colorR_raw = resR.hit ? clamp(sampleSource(resR.sxsy).rgb * u_gainR, 0.0, 1.0) : vec3(0.0);
@@ -1460,6 +1812,8 @@ const sliderMap = [
     if (panoWMFbo) { gl.deleteFramebuffer(panoWMFbo); panoWMFbo = null; }
     if (panoFullTex) { gl.deleteTexture(panoFullTex); panoFullTex = null; }
     if (panoFullFbo) { gl.deleteFramebuffer(panoFullFbo); panoFullFbo = null; }
+    // Clear seam mask for new source
+    if (seamMaskTex) { gl.deleteTexture(seamMaskTex); seamMaskTex = null; }
     panoFullW = 0; panoFullH = 0;
   }
 
@@ -1488,25 +1842,27 @@ const sliderMap = [
       glProgram = createProgram(gl, VS_SOURCE, FS_SOURCE);
       // Cache uniform locations once at program creation
       glProgram._u = {
-        u_image:       gl.getUniformLocation(glProgram, 'u_image'),
-        u_imageLF:     gl.getUniformLocation(glProgram, 'u_imageLF'),
-        u_gainR:       gl.getUniformLocation(glProgram, 'u_gainR'),
-        u_srcSize:     gl.getUniformLocation(glProgram, 'u_srcSize'),
-        u_centersL:    gl.getUniformLocation(glProgram, 'u_centersL'),
-        u_centersR:    gl.getUniformLocation(glProgram, 'u_centersR'),
-        u_radius:      gl.getUniformLocation(glProgram, 'u_radius'),
-        u_halfFov:     gl.getUniformLocation(glProgram, 'u_halfFov'),
-        u_f:           gl.getUniformLocation(glProgram, 'u_f'),
-        u_hfBandWidth: gl.getUniformLocation(glProgram, 'u_hfBandWidth'),
-        u_axisL:       gl.getUniformLocation(glProgram, 'u_axisL'),
-        u_upL:         gl.getUniformLocation(glProgram, 'u_upL'),
-        u_rightL:      gl.getUniformLocation(glProgram, 'u_rightL'),
-        u_axisR:       gl.getUniformLocation(glProgram, 'u_axisR'),
-        u_upR:         gl.getUniformLocation(glProgram, 'u_upR'),
-        u_rightR:      gl.getUniformLocation(glProgram, 'u_rightR'),
-        u_stretchL:    gl.getUniformLocation(glProgram, 'u_stretchL'),
-        u_stretchR:    gl.getUniformLocation(glProgram, 'u_stretchR'),
-        u_diffMode:    gl.getUniformLocation(glProgram, 'u_diffMode'),
+        u_image:        gl.getUniformLocation(glProgram, 'u_image'),
+        u_imageLF:      gl.getUniformLocation(glProgram, 'u_imageLF'),
+        u_gainR:        gl.getUniformLocation(glProgram, 'u_gainR'),
+        u_srcSize:      gl.getUniformLocation(glProgram, 'u_srcSize'),
+        u_centersL:     gl.getUniformLocation(glProgram, 'u_centersL'),
+        u_centersR:     gl.getUniformLocation(glProgram, 'u_centersR'),
+        u_radius:       gl.getUniformLocation(glProgram, 'u_radius'),
+        u_halfFov:      gl.getUniformLocation(glProgram, 'u_halfFov'),
+        u_f:            gl.getUniformLocation(glProgram, 'u_f'),
+        u_hfBandWidth:  gl.getUniformLocation(glProgram, 'u_hfBandWidth'),
+        u_axisL:        gl.getUniformLocation(glProgram, 'u_axisL'),
+        u_upL:          gl.getUniformLocation(glProgram, 'u_upL'),
+        u_rightL:       gl.getUniformLocation(glProgram, 'u_rightL'),
+        u_axisR:        gl.getUniformLocation(glProgram, 'u_axisR'),
+        u_upR:          gl.getUniformLocation(glProgram, 'u_upR'),
+        u_rightR:       gl.getUniformLocation(glProgram, 'u_rightR'),
+        u_stretchL:     gl.getUniformLocation(glProgram, 'u_stretchL'),
+        u_stretchR:     gl.getUniformLocation(glProgram, 'u_stretchR'),
+        u_diffMode:     gl.getUniformLocation(glProgram, 'u_diffMode'),
+        u_seamMask:     gl.getUniformLocation(glProgram, 'u_seamMask'),
+        u_useSeamMask:  gl.getUniformLocation(glProgram, 'u_useSeamMask'),
       };
     }
     gl.useProgram(glProgram);
@@ -1521,10 +1877,13 @@ const sliderMap = [
     gl.bindTexture(gl.TEXTURE_2D, currentTexture);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, lfTex);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, seamMaskTex);
 
     const u = glProgram._u;
     gl.uniform1i(u.u_image, 0);
     gl.uniform1i(u.u_imageLF, 1);
+    gl.uniform1i(u.u_seamMask, 2);
 
     const gainR = currentGainR;
     const cxL = srcW * cfg.centers.left[0];
@@ -1578,6 +1937,7 @@ const sliderMap = [
     gl.uniform1f(u.u_stretchL, cfg.stretch.left);
     gl.uniform1f(u.u_stretchR, cfg.stretch.right);
     gl.uniform1i(u.u_diffMode, diffMode ? 1 : 0);
+    gl.uniform1i(u.u_useSeamMask, seamMaskTex ? 1 : 0);
 
     gl.viewport(0, 0, panoW, panoH);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -2159,22 +2519,21 @@ const SPHERE_FS = `#version 300 es
     if (!fileList || fileList.length === 0) return;
 
     const totalFiles = fileList.length;
-    
-    // Load all images and scale them
-    const images = [];
-    for (let i = 0; i < totalFiles; i++) {
-      setLoading(true, `Loading frame ${i + 1} of ${totalFiles}...`);
-      await new Promise(requestAnimationFrame);
-      let img = await loadImageFromFile(fileList[i]);
-      img = scaleSource(img); // 2x upscale if X2 is on
-      images.push(img);
-    }
 
-    const refImg = images[0];
+    // Stream the frames one at a time: each is loaded, scaled, drawn into the
+    // running average, then its reference is dropped immediately so its decoded
+    // bitmap can be garbage-collected. This keeps peak memory bounded to a
+    // single image regardless of how many frames are merged (the old code held
+    // every frame's bitmap in an array until the very end, which OOM'd on large
+    // stacks). Because the blend uses a constant per-frame alpha of 1/N with the
+    // 'lighter' operator, the order of accumulation doesn't affect the result.
+    setLoading(true, `Loading frame 1 of ${totalFiles}...`);
+    await new Promise(requestAnimationFrame);
+    const refImg = scaleSource(await loadImageFromFile(fileList[0]));
+
     const w = refImg.width;
     const h = refImg.height;
 
-    // Average all frames at their (already-scaled) resolution
     const outCanvas = document.createElement('canvas');
     outCanvas.width = w;
     outCanvas.height = h;
@@ -2182,14 +2541,18 @@ const SPHERE_FS = `#version 300 es
     octx.fillStyle = '#000000';
     octx.fillRect(0, 0, w, h);
     octx.globalCompositeOperation = 'lighter';
+    octx.globalAlpha = 1.0 / totalFiles;
+    octx.drawImage(refImg, 0, 0, w, h);
+    refImg.src = ''; // release the decoded bitmap
 
-    for (let i = 0; i < totalFiles; i++) {
+    for (let i = 1; i < totalFiles; i++) {
       setLoading(true, `Blending frame ${i + 1} of ${totalFiles}...`);
       await new Promise(requestAnimationFrame);
-      octx.globalAlpha = 1.0 / totalFiles;
-      octx.drawImage(images[i], 0, 0, w, h);
+      const img = scaleSource(await loadImageFromFile(fileList[i]));
+      octx.drawImage(img, 0, 0, w, h);
+      img.src = ''; // release the decoded bitmap
     }
-    
+
     octx.globalAlpha = 1.0;
     octx.globalCompositeOperation = 'source-over';
     return outCanvas;
@@ -2200,14 +2563,14 @@ const SPHERE_FS = `#version 300 es
   // — the entire fusion runs on the GPU instead of a per-pixel CPU loop.
   // The loop is unrolled with constant sampler indices because some WebGL2
   // drivers forbid dynamically-indexed sampler arrays.
-  function createHdrFuseProgram() {
+  function createHdrFuseProgramFor(count) {
     const vs = `#version 300 es
       layout(location = 0) in vec2 a_position;
       out vec2 v_uv;
       void main() { v_uv = a_position * 0.5 + 0.5; gl_Position = vec4(a_position, 0.0, 1.0); }`;
 
     let body = '';
-    for (let i = 0; i < MAX_HDR_FRAMES; i++) {
+    for (let i = 0; i < count; i++) {
       body += `
       if (${i} < u_count) {
         vec3 c${i} = texture(u_frames[${i}], uv).rgb;
@@ -2223,11 +2586,13 @@ const SPHERE_FS = `#version 300 es
       precision highp float;
       in vec2 v_uv;
       out vec4 fragColor;
-      uniform sampler2D u_frames[${MAX_HDR_FRAMES}];
+      uniform sampler2D u_frames[${count}];
       uniform int u_count;
       uniform float u_sigma;
       uniform float u_center;
       uniform float u_base;
+      uniform float u_scale;
+      uniform sampler2D u_prev;
       void main() {
         float inv2Sig2 = 1.0 / (2.0 * u_sigma * u_sigma);
         vec3 acc = vec3(0.0);
@@ -2236,11 +2601,118 @@ const SPHERE_FS = `#version 300 es
         // orientation, matching what uploadTexture expects upstream.
         vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
         ${body}
-        acc /= max(wsum, 1e-6);
-        fragColor = vec4(clamp(acc, 0.0, 1.0), 1.0);
+        // Scale this batch's raw weighted sum so it can be added to the previous
+        // batches' accumulator (already scaled by the same 1/totalFrames) without
+        // clipping in 8-bit storage; the alpha cancels out at normalisation.
+        acc *= u_scale;
+        wsum *= u_scale;
+        vec4 prev = texture(u_prev, v_uv);
+        acc += prev.rgb;
+        wsum += prev.a;
+        fragColor = vec4(clamp(acc, 0.0, 1.0), clamp(wsum, 0.0, 1.0));
       }`;
 
+    const prog = createProgram(gl, vs, fs);
+    prog._maxFrames = count;
+    return prog;
+  }
+
+  // One fusion program per batch size (the sampler array is sized at compile time),
+  // with uniform locations cached the first time it is used.
+  const hdrFusePrograms = new Map();
+  function getHdrFuseProgram(count) {
+    let prog = hdrFusePrograms.get(count);
+    if (!prog) {
+      prog = createHdrFuseProgramFor(count);
+      prog._u = {};
+      for (let i = 0; i < count; i++) prog._u[`u_frames[${i}]`] = gl.getUniformLocation(prog, `u_frames[${i}]`);
+      prog._u.u_count  = gl.getUniformLocation(prog, 'u_count');
+      prog._u.u_sigma  = gl.getUniformLocation(prog, 'u_sigma');
+      prog._u.u_center = gl.getUniformLocation(prog, 'u_center');
+      prog._u.u_base   = gl.getUniformLocation(prog, 'u_base');
+      prog._u.u_scale  = gl.getUniformLocation(prog, 'u_scale');
+      prog._u.u_prev   = gl.getUniformLocation(prog, 'u_prev');
+      hdrFusePrograms.set(count, prog);
+    }
+    return prog;
+  }
+
+  // Fuses one batch of equally-sized frame textures into an accumulator FBO,
+  // adding to the previous batches' accumulator (ping-pong between two FBOs).
+  function fuseBatch(prog, frameTex, batchCount, w, h, prevTex, outFbo, uScale) {
+    gl.useProgram(prog);
+    gl.bindVertexArray(getQuadVAO());
+    const u = prog._u;
+    for (let i = 0; i < batchCount; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, frameTex[i]);
+      gl.uniform1i(u[`u_frames[${i}]`], i);
+    }
+    gl.uniform1i(u.u_count, batchCount);
+    gl.uniform1f(u.u_sigma, cfg.hdr.sigma);
+    gl.uniform1f(u.u_center, cfg.hdr.bellCenter);
+    gl.uniform1f(u.u_base, cfg.hdr.base);
+    gl.uniform1f(u.u_scale, uScale);
+    gl.activeTexture(gl.TEXTURE0 + batchCount);
+    gl.bindTexture(gl.TEXTURE_2D, prevTex);
+    gl.uniform1i(u.u_prev, batchCount);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
+    gl.viewport(0, 0, w, h);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // Normalises the accumulated (weighted-sum / weight-sum) pair back to a colour.
+  function createNormalizeProgram() {
+    const vs = `#version 300 es
+      layout(location = 0) in vec2 a_position;
+      out vec2 v_uv;
+      void main() { v_uv = a_position * 0.5 + 0.5; gl_Position = vec4(a_position, 0.0, 1.0); }`;
+    const fs = `#version 300 es
+      precision highp float;
+      in vec2 v_uv;
+      out vec4 fragColor;
+      uniform sampler2D u_acc;
+      void main() {
+        vec4 a = texture(u_acc, v_uv);
+        float w = max(a.a, 1e-6);
+        fragColor = vec4(clamp(a.rgb / w, 0.0, 1.0), 1.0);
+      }`;
     return createProgram(gl, vs, fs);
+  }
+
+  let normalizeProgram = null;
+  function normalizeAccumulator(accTex, w, h, outFbo) {
+    if (!normalizeProgram) normalizeProgram = createNormalizeProgram();
+    gl.useProgram(normalizeProgram);
+    gl.bindVertexArray(getQuadVAO());
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, accTex);
+    gl.uniform1i(gl.getUniformLocation(normalizeProgram, 'u_acc'), 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
+    gl.viewport(0, 0, w, h);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // Creates a size-keyed RGBA8 accumulation target, cleared to zero. Used for the
+  // running HDR fusion accumulator (ping-ponged between two of these).
+  function makeAccumTarget(tw, th) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, tw, th);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.viewport(0, 0, tw, th);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fbo };
   }
 
   async function processAndMergeHDR(fileList) {
@@ -2252,85 +2724,89 @@ const SPHERE_FS = `#version 300 es
       return;
     }
 
-    // Load + scale every frame (same pipeline as a single load).
-    const images = [];
-    for (let i = 0; i < totalFiles; i++) {
-      setLoading(true, `Loading HDR frame ${i + 1} of ${totalFiles}...`);
+    // Fuse the frames in batches of MERGE_BATCH so only a handful of source
+    // textures (and decoded bitmaps) are resident at any moment. Each batch is
+    // weight-blended and added into a running accumulator (ping-ponged between
+    // two FBOs); a final normalise pass turns the accumulated (sum/weight) pair
+    // back into a colour. This keeps peak GPU/CPU memory flat instead of scaling
+    // with the frame count, and never exceeds the per-draw texture-unit limit
+    // (which an all-frames-at-once single pass would).
+    const prog = getHdrFuseProgram(MERGE_BATCH);
+    const uScale = 1.0 / totalFiles;
+    const frameTex = new Array(MERGE_BATCH);
+
+    let w = 0, h = 0;
+    let acc = null, tmp = null;
+
+    let processed = 0;
+    while (processed < totalFiles) {
+      const end = Math.min(processed + MERGE_BATCH, totalFiles);
+      const batchCount = end - processed;
+
+      // Load + scale + upload only this batch's frames, releasing each decoded
+      // bitmap immediately so memory stays bounded.
+      for (let i = 0; i < batchCount; i++) {
+        const fileIndex = processed + i;
+        setLoading(true, `Loading HDR frame ${fileIndex + 1} of ${totalFiles}...`);
+        await new Promise(requestAnimationFrame);
+        const img = scaleSource(await loadImageFromFile(fileList[fileIndex]));
+        if (w === 0) {
+          w = img.width; h = img.height;
+          acc = makeAccumTarget(w, h);
+          tmp = makeAccumTarget(w, h);
+        }
+        const t = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0 + i);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        frameTex[i] = t;
+        img.src = ''; // release the decoded bitmap
+      }
+
+      setLoading(true, `Fusing HDR batch ${Math.floor(processed / MERGE_BATCH) + 1} of ${Math.ceil(totalFiles / MERGE_BATCH)}...`);
       await new Promise(requestAnimationFrame);
-      let img = await loadImageFromFile(fileList[i]);
-      img = scaleSource(img); // 2x upscale if X2 is on
-      images.push(img);
+      // Accumulate this batch onto the running sum (prev = acc, out = tmp).
+      fuseBatch(prog, frameTex, batchCount, w, h, acc.tex, tmp.fbo, uScale);
+
+      // Swap: tmp becomes the new accumulator for the next batch.
+      const st = acc; acc = tmp; tmp = st;
+
+      // Free this batch's source textures right away.
+      for (let i = 0; i < batchCount; i++) gl.deleteTexture(frameTex[i]);
+
+      processed = end;
     }
 
-    const w = images[0].width;
-    const h = images[0].height;
-
-    // Upload each frame as a GL texture (sampled by normalised UV, so equally
-    // sized bracketed exposures stay pixel-aligned).
-    const frameTex = [];
-    for (let i = 0; i < totalFiles; i++) {
-      const t = gl.createTexture();
-      gl.activeTexture(gl.TEXTURE0 + i);
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, images[i]);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      frameTex.push(t);
-    }
-
-    if (!hdrFuseProgram) hdrFuseProgram = createHdrFuseProgram();
-    gl.useProgram(hdrFuseProgram);
-    gl.bindVertexArray(getQuadVAO());
-
-    for (let i = 0; i < totalFiles; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i);
-      gl.bindTexture(gl.TEXTURE_2D, frameTex[i]);
-      gl.uniform1i(gl.getUniformLocation(hdrFuseProgram, `u_frames[${i}]`), i);
-    }
-    gl.uniform1i(gl.getUniformLocation(hdrFuseProgram, 'u_count'), totalFiles);
-    gl.uniform1f(gl.getUniformLocation(hdrFuseProgram, 'u_sigma'), cfg.hdr.sigma);
-    gl.uniform1f(gl.getUniformLocation(hdrFuseProgram, 'u_center'), cfg.hdr.bellCenter);
-    gl.uniform1f(gl.getUniformLocation(hdrFuseProgram, 'u_base'), cfg.hdr.base);
-
-    // Render the fusion into an offscreen RGBA8 target at the source resolution.
+    // Normalise the accumulated (weighted-sum / weight-sum) pair into a colour.
     const outTex = gl.createTexture();
-    gl.activeTexture(gl.TEXTURE0 + totalFiles);
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, outTex);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const outFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, outTex, 0);
-    gl.viewport(0, 0, w, h);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    normalizeAccumulator(acc.tex, w, h, outFbo);
 
     // Read back and flip rows (GL framebuffer origin is bottom-left) so the canvas
-    // keeps the source's top-row-first orientation.
+    // keeps the source's top-row-first orientation. IMPORTANT: normalizeAccumulator
+    // unbinds the framebuffer, so re-bind outFbo here or readPixels would read the
+    // default (visible-canvas) framebuffer and return garbage.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
     const buf = new Uint8Array(w * h * 4);
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    for (let i = 0; i < totalFiles; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i);
-      gl.bindTexture(gl.TEXTURE_2D, null);
-      gl.deleteTexture(frameTex[i]);
-    }
-    gl.activeTexture(gl.TEXTURE0);
-    gl.deleteFramebuffer(fbo);
-    gl.deleteTexture(outTex);
+    // Cleanup all GPU resources for this merge.
+    gl.deleteTexture(acc.tex);  gl.deleteFramebuffer(acc.fbo);
+    gl.deleteTexture(tmp.tex);  gl.deleteFramebuffer(tmp.fbo);
+    gl.deleteTexture(outTex);   gl.deleteFramebuffer(outFbo);
 
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = w;
-    outCanvas.height = h;
-    const id = new ImageData(w, h);
-    for (let y = 0; y < h; y++) {
-      const src = (h - 1 - y) * w * 4;
-      id.data.set(buf.subarray(src, src + w * 4), y * w * 4);
-    }
-    outCanvas.getContext('2d').putImageData(id, 0, 0);
-    return outCanvas;
+    return rgbaBufferToCanvas(buf, w, h);
   }
 
   // ===========================================================================
