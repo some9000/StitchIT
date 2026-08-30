@@ -374,14 +374,14 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const DEFAULT_CFG = Object.freeze({
-    fovDeg: 190.0,
-    radiusScale: 0.97,
+    fovDeg: 186.8,
+    radiusScale: 0.95,
     centers: { left: [0.25, 0.50], right: [0.75, 0.50] },
     rollDeg: { left: 0.0, right: 0.0 },
     height: { ll: 100.0, lr: 100.0, rl: 100.0, rr: 100.0 },
     centerOffset: { ll: 0, lr: 0, rl: 0, rr: 0 },
     blend: { hfBandWidth: 0.05, seamShift: 0 },
-    hdr: { sigma: 0.35, bellCenter: 0.50, base: 0.05, brightness: 0 },
+    hdr: { sigma: 0.30, bellCenter: 0.30, base: 0.30, brightness: -0.30 },
     mirror3D: false,
   });
 
@@ -389,8 +389,8 @@ document.addEventListener('DOMContentLoaded', () => {
     temperature: 6500,
     exposure: 1,
     gamma: 1,
-    sharpen: 0.20,
-    saturation: 1,
+    sharpen: 0.50,
+    saturation: 0.85,
     contrast: 1,
   });
 
