@@ -2,9 +2,13 @@
 
 Browser-based dual-fisheye to equirectangular 360° stitcher. Everything runs on the GPU - no image ever leaves your machine.
 
+<img width="3770" height="1804" alt="2026-08-30 10 56 04 stitchit-smoky vercel app 46245936d76f" src="https://github.com/user-attachments/assets/f8acde38-5abe-466c-a803-8c8f0b40f1dd" />
+
 ## What it does
 
 StitchIT takes dual-fisheye source images from 360° cameras and produces stitched equirectangular panoramas, entirely in the browser. No server, no upload, no install. You can also load already stitched images to (HDR) merge them and/or adjust the appearance.
+
+<img width="3770" height="1804" alt="2026-08-30 11 01 39 stitchit-smoky vercel app 613fb87fa014" src="https://github.com/user-attachments/assets/cdd0d0e2-9347-4ae7-8fba-1253a47e7d9c" />
 
 ## Features
 
@@ -38,19 +42,20 @@ That's it.
 | **HD** | Toggle 2x upscaling for higher resolution output |
 | **3D** | Switch between 2D canvas and 3D equirectangular preview |
 
-- Most sliders and controls have tooltips - hover over any control to see what it does.
 - Double-click the result to toggle between 2D and 3D view
 - Drag to pan in 3D view
 - Scroll to zoom in 3D view
+
+**Most sliders and controls have tooltips - hover over any control to see what it does.**
 
 ## Requirements
 
 - A modern browser with WebGL support
 - No server required - runs entirely from a local file or any static host
 
-You can support me here, in case you would like to: https://buymeacoffee.com/some9000 Thanks!
+This project would not exist without inspiration from https://github.com/sanriomisintaro/stitch-360
 
-Also, this project would not exist without inspiration from https://github.com/sanriomisintaro/stitch-360
+You can support me here, in case you would like to: https://buymeacoffee.com/some9000
 
 ## Tutorial
 
@@ -64,7 +69,8 @@ Also, this project would not exist without inspiration from https://github.com/s
    - **Radius** - scales the lens projection radius
    - **Center L / Center R** - nudges each lens horizontally if the optical center isn't perfectly aligned
    - **Seam Width** - controls how wide the blend zone is at the stitch line
-5. When you're happy, click **Export JPG (XMP)** to save
+
+When you're happy, click **Export JPG (XMP)** or **Export PNG** to save
 
 ### 2. HDR merge
 
