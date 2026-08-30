@@ -49,3 +49,84 @@ That's it.
 - No server required - runs entirely from a local file or any static host
 
 You can support me here, in case you would like to: https://buymeacoffee.com/some9000 Thanks!
+
+Also, this project would not exist without inspiration from https://github.com/sanriomisintaro/stitch-360
+
+## Tutorial
+
+### 1. Basic stitch
+
+1. Open `index.html` in your browser or go to stitchit-smoky.vercel.app
+2. Click **Open OO** and select your dual-fisheye image
+3. The image loads and stitches automatically - you'll see the result on the canvas
+4. If the stitch looks off, tweak the lens controls in the sidebar:
+   - **FOV** - adjust if the fisheye field of view isn't exactly 180°
+   - **Radius** - scales the lens projection radius
+   - **Center L / Center R** - nudges each lens horizontally if the optical center isn't perfectly aligned
+   - **Seam Width** - controls how wide the blend zone is at the stitch line
+5. When you're happy, click **Export JPG (XMP)** to save
+
+### 2. HDR merge
+
+This is more of a "HDR-ish" processing which lets you add images of any exposure and find a decent blend by changing the settings.
+
+1. Click **HDR Merge OO** and select your bracketed images (they'll be listed in the loader)
+2. The app merges them into a single HDR-ready source, then stitches as normal
+3. Adjust **HDR Sigma** if the merge looks too flat or too contrasty
+4. Export as usual
+
+### 3. Frame stacking
+
+For reducing noise by averaging multiple captures:
+
+1. Click **Merge OO** and select your frames
+2. They'll be aligned and blended into a single cleaner image
+3. More frames = less noise
+
+### 4. Post-processing
+
+The **Processing** panel has all your adjustments:
+
+| Control | What it does |
+|---|---|
+| **Exposure** | Brighten or darken the image |
+| **Gamma** | Adjust midtone response |
+| **Contrast** | Stretch or compress tonal range |
+| **Saturation** | Boost or reduce colour intensity |
+| **Sharpen** | Apply unsharp masking for crisper detail |
+| **Temperature** | Warm or cool the white balance |
+
+Toggle all processing on/off with the **ON / OFF** button. You can **Save** your processing settings to a file and **Load** them back later.
+
+### 5. Watermark / nadir decal
+
+You can add a watermark to the bottom of the panorama to cover the tripod or yourself:
+
+1. Click the **+** button in the **Watermark** section and select your decal image
+2. Use **Size** and **Rotation** sliders to position it
+3. Export with **Export JPG (XMP)** - the decal is baked into the output
+
+### 6. 3D preview
+
+1. Click **3D** in the top-right corner of the canvas
+2. Drag to pan around the panorama
+3. Scroll to zoom in and out
+4. Click **3D** again (or double-click the canvas) to return to the flat view
+
+Double clicking will aim the 3D at the place you click.
+
+### 7. Lens profiles
+
+If you're stitching the same camera repeatedly:
+
+1. Dial in your lens settings (FOV, radius, center offsets, etc.)
+2. Click **Export Profile** to save them as a JSON file
+3. Next time, click **Import Profile** to load your saved settings instantly
+
+### 8. Export options
+
+- **Export JPG (XMP)** - saves a JPG with XMP metadata so 360° viewers (Google Photos, Facebook, etc.) recognise it as a panorama
+- **Export PNG** - lossless output without metadata
+- Toggle **HD** before processing for 2x resolution. Can make the results look better if you have an older, lower resolution camera.
+
+Enjoy!
