@@ -4,7 +4,7 @@ Browser-based dual-fisheye to equirectangular 360° stitcher. Everything runs on
 
 ## What it does
 
-StitchIT takes dual-fisheye source images from 360° cameras and produces stitched equirectangular panoramas, entirely in the browser. No server, no upload, no install.
+StitchIT takes dual-fisheye source images from 360° cameras and produces stitched equirectangular panoramas, entirely in the browser. No server, no upload, no install. You can also load already stitched images to (HDR) merge them and/or adjust the appearance.
 
 ## Features
 
