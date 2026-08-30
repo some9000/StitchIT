@@ -10,6 +10,7 @@ window.S360 = window.S360 || {};
       if (typeof c.fovDeg === 'number') cfg.fovDeg = c.fovDeg;
       if (typeof c.radiusScale === 'number') cfg.radiusScale = c.radiusScale;
       if (typeof c.mirror3D === 'boolean') cfg.mirror3D = c.mirror3D;
+      if (typeof c.autoAlign === 'boolean') cfg.autoAlign = c.autoAlign;
       if (c.blend) cfg.blend = { ...DEFAULT_CFG.blend, ...c.blend };
       if (c.hdr) cfg.hdr = { ...DEFAULT_CFG.hdr, ...c.hdr };
       if (c.centers) {

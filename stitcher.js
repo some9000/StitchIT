@@ -131,6 +131,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const viewModeBtn     = document.getElementById('viewModeBtn');
   const x2Btn           = document.getElementById('x2Btn');
   const schematicBtn    = document.getElementById('schematicBtn');
+  const autoAlignBtn    = document.getElementById('autoAlignBtn');
   const seamBtn         = document.getElementById('seamBtn');
   const mirror3DBtn     = document.getElementById('mirror3DBtn');
   const exportProfileBtn = document.getElementById('exportProfileBtn');
@@ -382,6 +383,7 @@ document.addEventListener('DOMContentLoaded', () => {
     centerOffset: { ll: 0, lr: 0, rl: 0, rr: 0 },
     blend: { hfBandWidth: 0.05, seamShift: 0 },
     hdr: { sigma: 0.30, bellCenter: 0.30, base: 0.30, brightness: -0.30 },
+    autoAlign: true,
     mirror3D: false,
   });
 
@@ -751,6 +753,13 @@ const sliderMap = [
         container.appendChild(overlay);
       });
     }
+    if (autoAlignBtn) {
+      autoAlignBtn.addEventListener('click', () => {
+        cfg.autoAlign = !cfg.autoAlign;
+        autoAlignBtn.classList.toggle('active', cfg.autoAlign);
+        if (currentImg) { scheduleContentAwareSeam(); markStitchDirty(); renderPano(); }
+      });
+    }
     if (seamBtn) {
       seamBtn.addEventListener('click', () => {
         showSeam = !showSeam;
@@ -835,6 +844,7 @@ const sliderMap = [
     }
 
     // Update toggle buttons (not part of sliderMap)
+    if (autoAlignBtn) autoAlignBtn.classList.toggle('active', cfg.autoAlign);
     if (mirror3DBtn) mirror3DBtn.classList.toggle('active', cfg.mirror3D);
     if (schematicBtn) schematicBtn.classList.toggle('active', schematicMode);
     if (seamBtn) seamBtn.classList.toggle('active', showSeam);
@@ -894,6 +904,7 @@ const sliderMap = [
     seamWidth:       'Width of the seam blend zone (0-100). Wider = smoother transition but more ghosting risk.',
     seamShift:       'Manual offset of the automatic seam position. Positive shifts toward the left lens.',
     schematicBtn:    'Show the lens geometry overlay on the source image.',
+    autoAlignBtn:     'Automatically optimise lens geometry to minimise overlap error. Disable for moving subjects like trees or water.',
     seamBtn:         'Highlight the seam blend zone in the stitched output.',
     mirror3DBtn:     'Mirror the 3D spherical view horizontally.',
     resetTrapBtn:    'Reset all trapezoid alignment sliders to zero.',
@@ -934,12 +945,12 @@ const sliderMap = [
         All processing runs on the GPU - no upload to any server.
       </p>
       <p style="margin:0 0 1rem; font-size:1rem; color:#a1a1aa; line-height:1.5;">
-        <span style="display:inline-block; background:#22c55e; color:#fff; padding:0.35rem 0.75rem; border-radius:6px; font-weight:600; font-size:0.875rem;">Open OO</span> - load a dual-fisheye source image<br><br>
-        <span style="display:inline-block; background:#f59e0b; color:#fff; padding:0.35rem 0.75rem; border-radius:6px; font-weight:600; font-size:0.875rem;">HDR Merge OO</span> - merge multiple exposures first<br><br>
-        <span style="display:inline-block; background:#3b82f6; color:#fff; padding:0.35rem 0.75rem; border-radius:6px; font-weight:600; font-size:0.875rem;">Merge OO</span> - stack frames for noise reduction
+        <button class="active">Open OO</button> - load a dual-fisheye source image<br><br>
+        <button class="hdr-btn">HDR Merge OO</button> - merge multiple exposures first<br><br>
+        <button class="primary">Merge OO</button> - stack frames for noise reduction
       </p>
       <p style="margin:0 0 0.5rem; font-size:1rem; color:#a1a1aa; line-height:1.5;">
-        <span style="display:inline-block; background:#27272a; color:#e4e4e7; padding:0.35rem 0.75rem; border-radius:6px; font-weight:600; font-size:0.875rem;">Stitched</span> - use already stitched images instead of dual-fisheye ones
+        <button>Stitched</button> - use already stitched images instead of dual-fisheye ones
       </p>
       <p style="margin:0; font-size:1rem; color:#a1a1aa;">
         Double-click result to toggle 2D/3D. Drag to pan in 3D view.<br>
@@ -991,6 +1002,7 @@ const sliderMap = [
       g.querySelectorAll('input, button').forEach(el => { el.disabled = isStitched; });
     });
     if (mirror3DBtn) mirror3DBtn.disabled = false;
+    if (autoAlignBtn) autoAlignBtn.disabled = false;
   }
 
   if (imageLoader) imageLoader.addEventListener('change', onFile, false);
@@ -1061,8 +1073,10 @@ const sliderMap = [
 
       // Auto-calibrate: optimise lens geometry to minimise overlap error so
       // both views agree before the seam ever sees them.
-      setLoading(true, 'Auto-calibrating lens alignment...');
-      S360.autoCalibrateOverlap(img, cfg);
+      if (cfg.autoAlign) {
+        setLoading(true, 'Auto-calibrating lens alignment...');
+        S360.autoCalibrateOverlap(img, cfg);
+      }
       S360.settings.updateUIFromConfig(ctx);
       S360.settings.scheduleLiveSave(ctx);
       drawLensSchematic();
