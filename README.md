@@ -1,3 +1,7 @@
+This project would not exist without inspiration from https://github.com/sanriomisintaro/stitch-360
+
+You can support me here, in case you would like to: https://buymeacoffee.com/some9000
+
 # StitchIT
 
 Browser-based dual-fisheye to equirectangular 360° stitcher. Everything runs on the GPU - no image ever leaves your machine.
@@ -56,10 +60,6 @@ That's it.
 
 - A modern browser with WebGL support
 - No server required - runs entirely from a local file or any static host
-
-This project would not exist without inspiration from https://github.com/sanriomisintaro/stitch-360
-
-You can support me here, in case you would like to: https://buymeacoffee.com/some9000
 
 ## Tutorial
 
