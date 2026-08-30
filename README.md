@@ -47,3 +47,5 @@ That's it.
 
 - A modern browser with WebGL support
 - No server required - runs entirely from a local file or any static host
+
+You can support me here, in case you would like to: https://buymeacoffee.com/some9000 Thanks!
