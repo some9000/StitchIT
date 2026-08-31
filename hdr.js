@@ -1,13 +1,107 @@
 // hdr.js
 window.S360 = window.S360 || {};
 (function (S360) {
-  // Builds the exposure-fusion program once.  A single fragment shader samples
-  // every frame texture, applies a per-channel well-exposedness weight
-  // (Mertens-style), and accumulates — the entire fusion runs on the GPU
-  // instead of a per-pixel CPU loop.  The loop is unrolled with constant
-  // sampler indices because some WebGL2 drivers forbid dynamically-indexed
-  // sampler arrays.
+  const MAX_FRAMES = 16; // static upper bound for the dynamic-indexing shader
+
+  // Probe whether the current driver supports dynamically-indexed sampler arrays
+  // in fragment shaders.  Returns true if a test shader compiles and links.
+  function supportsDynamicSamplerIndexing(gl) {
+    const vs = `#version 300 es
+      layout(location = 0) in vec2 a_position;
+      void main() { gl_Position = vec4(a_position, 0.0, 1.0); }`;
+    const fs = `#version 300 es
+      precision highp float;
+      out vec4 fragColor;
+      uniform sampler2D u_frames[4];
+      uniform int u_idx;
+      void main() {
+        vec4 c = texture(u_frames[u_idx], vec2(0.5));
+        fragColor = c;
+      }`;
+    const prog = gl.createProgram();
+    const vShader = gl.createShader(gl.VERTEX_SHADER);
+    const fShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(vShader, vs); gl.compileShader(vShader);
+    gl.shaderSource(fShader, fs); gl.compileShader(fShader);
+    gl.attachShader(prog, vShader); gl.attachShader(prog, fShader); gl.linkProgram(prog);
+    const ok = gl.getProgramParameter(prog, gl.LINK_STATUS);
+    gl.deleteProgram(prog); gl.deleteShader(vShader); gl.deleteShader(fShader);
+    return !!ok;
+  }
+
+  // Single dynamic-indexing shader for all batch sizes.  Uses a fixed maximum
+  // sampler array and breaks out of the loop once u_count samples have been
+  // fused.  Falls back to the unrolled per-count shader on drivers that don't
+  // support dynamic sampler indexing.
+  S360.createHdrFuseProgramDynamic = function (gl) {
+      const vs = `#version 300 es
+        layout(location = 0) in vec2 a_position;
+        out vec2 v_uv;
+        void main() { v_uv = a_position * 0.5 + 0.5; gl_Position = vec4(a_position, 0.0, 1.0); }`;
+
+      const fs = `#version 300 es
+        precision highp float;
+        in vec2 v_uv;
+        out vec4 fragColor;
+        uniform sampler2D u_frames[${MAX_FRAMES}];
+        uniform int u_count;
+        uniform float u_sigma;
+        uniform float u_center;
+        uniform float u_base;
+        uniform float u_scale;
+        uniform sampler2D u_prev;
+        uniform vec2 u_offsets[${MAX_FRAMES}];
+        uniform float u_gains[${MAX_FRAMES}];
+        uniform vec2 u_imageSize;
+        uniform int u_robust;
+        uniform float u_robustThreshold;
+        uniform int u_wrapX;
+        vec3 srgbToLinear(vec3 c) {
+          bvec3 low = lessThanEqual(c, vec3(0.04045));
+          vec3 lo = c / 12.92;
+          vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+          return mix(hi, lo, low);
+        }
+        void main() {
+          float inv2Sig2 = 1.0 / (2.0 * u_sigma * u_sigma);
+          vec3 acc = vec3(0.0);
+          float wsum = 0.0;
+          vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+          vec4 prev = texture(u_prev, v_uv);
+          for (int i = 0; i < ${MAX_FRAMES}; i++) {
+            if (i >= u_count) break;
+            vec2 sampleUv = uv + u_offsets[i] / u_imageSize;
+            if (u_wrapX == 1) sampleUv.x = fract(sampleUv.x);
+            vec3 encoded = texture(u_frames[i], sampleUv).rgb;
+            vec3 originalLinear = srgbToLinear(encoded);
+            vec3 c = originalLinear * u_gains[i];
+            vec3 d = encoded - vec3(u_center);
+            float w = u_base + (1.0 - u_base) * exp(-dot(d, d) * inv2Sig2);
+            if (u_robust == 1 && prev.a > 1e-6) {
+              vec3 prevMean = prev.rgb / prev.a;
+              float residual = length(c - prevMean) / 1.7320508;
+              w *= min(1.0, u_robustThreshold / max(residual, 1e-6));
+            }
+            acc += c * w;
+            wsum += w;
+          }
+          acc *= u_scale;
+          wsum *= u_scale;
+          acc += prev.rgb;
+          wsum += prev.a;
+          fragColor = vec4(acc, wsum);
+        }`;
+
+      return S360.createProgram(gl, vs, fs);
+  };
+
+  // Builds the exposure-fusion program once.  Tries dynamic sampler indexing
+  // first; if the driver rejects it, falls back to the unrolled per-count shader.
   S360.createHdrFuseProgramFor = function (gl, count) {
+      if (count <= MAX_FRAMES && supportsDynamicSamplerIndexing(gl)) {
+          return S360.createHdrFuseProgramDynamic(gl);
+      }
+      // Fallback: unrolled per-count shader.
       const vs = `#version 300 es
         layout(location = 0) in vec2 a_position;
         out vec2 v_uv;
@@ -22,9 +116,6 @@ window.S360 = window.S360 || {};
           vec3 encoded${i} = texture(u_frames[${i}], sampleUv${i}).rgb;
           vec3 originalLinear${i} = srgbToLinear(encoded${i});
           vec3 c${i} = originalLinear${i} * u_gains[${i}];
-          // Per-channel well-exposedness (Mertens-style): penalises any
-          // channel that deviates from the ideal mid-tone, so blown-out
-          // highlights AND crushed shadows are down-weighted naturally.
           vec3 d${i} = encoded${i} - vec3(u_center);
           float w${i} = u_base + (1.0 - u_base) * exp(-dot(d${i}, d${i}) * inv2Sig2);
           if (u_robust == 1 && prev.a > 1e-6) {
@@ -64,24 +155,13 @@ window.S360 = window.S360 || {};
           float inv2Sig2 = 1.0 / (2.0 * u_sigma * u_sigma);
           vec3 acc = vec3(0.0);
           float wsum = 0.0;
-          // Sample with a flipped V so the fused output keeps the source's top-row
-          // orientation, matching what uploadTexture expects upstream.
           vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
           vec4 prev = texture(u_prev, v_uv);
           ${body}
-          // Scale this batch's raw weighted sum so it can be added to the previous
-          // batches' accumulator (already scaled by the same 1/totalFrames) without
-          // clipping in 8-bit storage; the alpha cancels out at normalisation.
           acc *= u_scale;
           wsum *= u_scale;
           acc += prev.rgb;
           wsum += prev.a;
-          // Float accumulator: do NOT clamp here. The old code clamped both
-          // channels to [0,1], which re-quantised precision on every batch and
-          // undid the benefit of the half-float target (banding when many frames
-          // are merged). The final normalize pass clamps back to 8-bit output.
-          // (Fixed-point RGBA8 fallback auto-clamps on write, so dropping the
-          // explicit clamp is safe there too.)
           fragColor = vec4(acc, wsum);
         }`;
 
@@ -91,8 +171,35 @@ window.S360 = window.S360 || {};
   };
 
   // One fusion program per batch size (the sampler array is sized at compile time),
-  // with uniform locations cached the first time it is used.
+  // with uniform locations cached the first time it is used.  If the driver supports
+  // dynamic sampler indexing, a single shared program is reused for all batch sizes.
   S360.getHdrFuseProgram = function (gl, count, hdrFusePrograms) {
+      if (!S360._hdrDynamicSupported) {
+        S360._hdrDynamicSupported = supportsDynamicSamplerIndexing(gl);
+      }
+      if (S360._hdrDynamicSupported) {
+        if (!hdrFusePrograms._dynamicProg) {
+          const prog = S360.createHdrFuseProgramDynamic(gl);
+          prog._u = {};
+          for (let i = 0; i < MAX_FRAMES; i++) prog._u[`u_frames[${i}]`] = gl.getUniformLocation(prog, `u_frames[${i}]`);
+          for (let i = 0; i < MAX_FRAMES; i++) {
+              prog._u[`u_offsets[${i}]`] = gl.getUniformLocation(prog, `u_offsets[${i}]`);
+              prog._u[`u_gains[${i}]`] = gl.getUniformLocation(prog, `u_gains[${i}]`);
+          }
+          prog._u.u_count  = gl.getUniformLocation(prog, 'u_count');
+          prog._u.u_sigma  = gl.getUniformLocation(prog, 'u_sigma');
+          prog._u.u_center = gl.getUniformLocation(prog, 'u_center');
+          prog._u.u_base   = gl.getUniformLocation(prog, 'u_base');
+          prog._u.u_scale  = gl.getUniformLocation(prog, 'u_scale');
+          prog._u.u_prev   = gl.getUniformLocation(prog, 'u_prev');
+          prog._u.u_imageSize = gl.getUniformLocation(prog, 'u_imageSize');
+          prog._u.u_robust = gl.getUniformLocation(prog, 'u_robust');
+          prog._u.u_robustThreshold = gl.getUniformLocation(prog, 'u_robustThreshold');
+          prog._u.u_wrapX = gl.getUniformLocation(prog, 'u_wrapX');
+          hdrFusePrograms._dynamicProg = prog;
+        }
+        return hdrFusePrograms._dynamicProg;
+      }
       let prog = hdrFusePrograms.get(count);
       if (!prog) {
           prog = S360.createHdrFuseProgramFor(gl, count);

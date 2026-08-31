@@ -26,6 +26,33 @@ const { compositeWatermark, getWatermarkProgram } = S360;
 const { BLUR_VS, BLUR_FS, LANCZOS_VS, LANCZOS_H_FS, LANCZOS_V_FS, VS_SOURCE, FS_SOURCE, createPostProgram } = S360;
   const { loadImageFromFile, estimateGainR, estimateGainRFromSource, scaleSource, processAndBlendFiles } = S360;
 
+  // Precomputed white-balance lookup table (Helland approximation).
+  // Matches the UI slider step of 50 K over 2000..12000.
+  const WB_LUT = (() => {
+    const lut = [];
+    for (let k = 2000; k <= 12000; k += 50) {
+      const t = k / 100.0;
+      let wr, wg, wb;
+      if (t <= 66.0) {
+        wr = 255.0;
+        wg = 99.4708025861 * Math.log(t) - 161.1195681661;
+      } else {
+        wr = 329.698727446 * Math.pow(t - 60.0, -0.1332047592);
+        wg = 288.1221695283 * Math.pow(t - 60.0, -0.0755148492);
+      }
+      if (t >= 66.0) wb = 255.0;
+      else if (t <= 19.0) wb = 0.0;
+      else wb = 138.5177312231 * Math.log(t - 10.0) - 305.0447927307;
+      lut.push({ k, wr: Math.max(wr, 1e-3), wg: Math.max(wg, 1e-3), wb: Math.max(wb, 1e-3) });
+    }
+    return lut;
+  })();
+
+  function wbLookup(k) {
+    const idx = Math.round((k - 2000) / 50);
+    return (idx >= 0 && idx < WB_LUT.length) ? WB_LUT[idx] : WB_LUT[100];
+  }
+
   // Passthrough copy shader for already-stitched (equirectangular) sources.
   // Flips Y so north pole lands at the top of the FBO (matching readFboToCanvas).
   const COPY_VS = `#version 300 es
@@ -102,11 +129,13 @@ document.addEventListener('DOMContentLoaded', () => {
     S360.invalidateSharedVAO();
     S360.invalidateWatermarkPrograms();
     S360.invalidateBlurCache();
-    if (S360.invalidateHdrPrograms) S360.invalidateHdrPrograms(gl);
-    if (S360.invalidateGpuImagePrograms) S360.invalidateGpuImagePrograms();
+    S360.invalidateHdrPrograms(gl);
+    S360.invalidateGpuImagePrograms();
+    S360.invalidateLanczosPrograms();
     S360.viewerShared.panoFullTex = null; S360.viewerShared.panoFullFbo = null; S360.viewerShared.panoFullW = 0; S360.viewerShared.panoFullH = 0;
     S360.viewerShared.panoWMTex = null; S360.viewerShared.panoWMFbo = null;
     wmTex = null; wmFbo = null; wmFboTex = null; wmFboW = 0; wmFboH = 0;
+    getWmProg = getWatermarkProgram(gl);
     resetPools(gl);
     if (currentImg?.isGpuImage && currentImg.consumed) {
       // GPU-only merged results deliberately have no hundreds-of-megabytes CPU
@@ -131,7 +160,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const viewModeBtn     = document.getElementById('viewModeBtn');
   const x2Btn           = document.getElementById('x2Btn');
   const schematicBtn    = document.getElementById('schematicBtn');
-  const autoAlignBtn    = document.getElementById('autoAlignBtn');
   const seamBtn         = document.getElementById('seamBtn');
   const mirror3DBtn     = document.getElementById('mirror3DBtn');
   const exportProfileBtn = document.getElementById('exportProfileBtn');
@@ -181,6 +209,72 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentSeam = null;
   let seamTexture = null;
   let seamAnalysisTimer = null;
+  let seamWorker = null;
+  let seamWorkerBusy = false;
+  let seamWorkerPending = null;
+
+  function getSeamWorker() {
+    if (!seamWorker) {
+      try {
+        seamWorker = new Worker('seam-worker.js');
+        seamWorker.onmessage = function(e) {
+          const msg = e.data;
+          if (msg.type === 'result') {
+            currentSeam = msg.curve ? { curve: msg.curve, angles: msg.angles, score: msg.score } : null;
+            seamWorkerBusy = false;
+            uploadSeamCurve();
+            scheduleRender();
+            if (seamWorkerPending) {
+              const pending = seamWorkerPending;
+              seamWorkerPending = null;
+              runSeamAnalysis(pending.analysisSource, pending.proxy, pending.imgWidth, pending.imgHeight);
+            }
+          } else if (msg.type === 'error') {
+            console.warn('Seam analysis worker failed:', msg.message);
+            currentSeam = null;
+            seamWorkerBusy = false;
+            uploadSeamCurve();
+            scheduleRender();
+            if (seamWorkerPending) {
+              const pending = seamWorkerPending;
+              seamWorkerPending = null;
+              runSeamAnalysis(pending.analysisSource, pending.proxy, pending.imgWidth, pending.imgHeight);
+            }
+          }
+        };
+        seamWorker.onerror = function(err) {
+          console.warn('Seam analysis worker error:', err);
+          seamWorker = null;
+          seamWorkerBusy = false;
+          seamWorkerPending = null;
+        };
+      } catch (e) {
+        console.warn('Web Worker not available for seam analysis:', e);
+        seamWorker = null;
+      }
+    }
+    return seamWorker;
+  }
+
+  function runSeamAnalysis(analysisSource, proxy, imgWidth, imgHeight) {
+    const worker = seamWorker;
+    if (!worker) return;
+    const buffer = proxy.data.buffer.slice(0);
+    seamWorkerBusy = true;
+    worker.postMessage({
+      type: 'analyze',
+      proxy: {
+        w: proxy.w,
+        h: proxy.h,
+        data: buffer,
+        scale: proxy.scale
+      },
+      imgWidth: imgWidth,
+      imgHeight: imgHeight,
+      cfg: cfg,
+      gain: currentGainR?.gain || [1, 1, 1]
+    }, [buffer]);
+  }
   let showSeam = false;
   let isStitched = false;     // true when currentImg is already an equirectangular pano (skip fisheye stitch)
 
@@ -222,7 +316,30 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function updateContentAwareSeam(source = null) {
-    if (!currentImg || !S360.analyzeContentAwareSeam) return;
+    if (!currentImg) return;
+
+    const worker = getSeamWorker();
+    if (!worker) {
+      if (!S360.analyzeContentAwareSeam) return;
+      let analysisSource = source || currentImg;
+      if (!source && currentImg.isGpuImage && currentTexture) {
+        analysisSource = S360.gpuImageToProxyCanvas(gl, {
+          isGpuImage: true, texture: currentTexture,
+          width: currentImg.width, height: currentImg.height
+        }, 640);
+      } else if (source?.isGpuImage) {
+        analysisSource = S360.gpuImageToProxyCanvas(gl, source, 640);
+      }
+      try {
+        currentSeam = S360.analyzeContentAwareSeam(analysisSource, cfg, currentGainR?.gain);
+      } catch (error) {
+        console.warn('Content-aware seam analysis failed; using the neutral seam.', error);
+        currentSeam = null;
+      }
+      uploadSeamCurve();
+      return;
+    }
+
     let analysisSource = source || currentImg;
     if (!source && currentImg.isGpuImage && currentTexture) {
       analysisSource = S360.gpuImageToProxyCanvas(gl, {
@@ -232,15 +349,16 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (source?.isGpuImage) {
       analysisSource = S360.gpuImageToProxyCanvas(gl, source, 640);
     }
-    try {
-      currentSeam = S360.analyzeContentAwareSeam(analysisSource, cfg, currentGainR?.gain);
-    } catch (error) {
-      // A content-aware path is optional. Retain the neutral great-circle seam
-      // if a browser cannot read the analysis proxy for a particular source.
-      console.warn('Content-aware seam analysis failed; using the neutral seam.', error);
-      currentSeam = null;
+
+    const maxWidth = analysisSource.isGpuImage ? 640 : undefined;
+    const proxy = S360.makeProxy(analysisSource, maxWidth);
+
+    if (seamWorkerBusy) {
+      seamWorkerPending = { analysisSource, proxy, imgWidth: analysisSource.width, imgHeight: analysisSource.height };
+      return;
     }
-    uploadSeamCurve();
+
+    runSeamAnalysis(analysisSource, proxy, analysisSource.width, analysisSource.height);
   }
 
   function scheduleContentAwareSeam() {
@@ -292,13 +410,15 @@ document.addEventListener('DOMContentLoaded', () => {
   let wmRotDeg = 0;          // nadir decal rotation (degrees)
   let wmAlpha = 1.0;
   let wmProgram = null;
-  const getWmProg = getWatermarkProgram(gl);
+  let getWmProg = getWatermarkProgram(gl);
   let wmFbo = null, wmFboTex = null, wmFboW = 0, wmFboH = 0; // reusable FBO for export compositing
   let viewMode = '2d';
   let scaleValue = 1; // 1 = off, 2 = 2x scale
   let schematicMode = false; // schematic overlay for lens geometry
   let schematicGuideX = -1.0; // persistent guide point X (-1 = off)
   let schematicGuideY = -1.0; // persistent guide point Y
+  let schematicBgCache = null;   // offscreen canvas with static background + grid
+  let schematicBgCacheValid = false;
   let wbSampling = false;    // white-balance point-sampling mode
 
   // Render scheduling / caching state (items 1-4).
@@ -383,7 +503,6 @@ document.addEventListener('DOMContentLoaded', () => {
     centerOffset: { ll: 0, lr: 0, rl: 0, rr: 0 },
     blend: { hfBandWidth: 0.05, seamShift: 0 },
     hdr: { sigma: 0.30, bellCenter: 0.30, base: 0.30, brightness: -0.30 },
-    autoAlign: true,
     mirror3D: false,
   });
 
@@ -546,22 +665,12 @@ const sliderMap = [
       if (g <= 0) return;
 
       // Neutralise: solve for the Kelvin whose white point has the same r:g:b ratio
-      // as the sampled cast. We search the slider's range for the best match.
-      const lo = parseFloat(tempSlider.min), hi = parseFloat(tempSlider.max);
+      // as the sampled cast. We search the precomputed LUT for the best match.
       let bestK = 6500, bestErr = Infinity;
-      for (let k = lo; k <= hi; k += 50) {
-        // White point from the same approximation the shader uses (normalised).
-        const t = k / 100.0;
-        let wr, wg, wb;
-        if (t <= 66.0) { wr = 255.0; wg = 99.4708025861 * Math.log(t) - 161.1195681661; }
-        else { wr = 329.698727446 * Math.pow(t - 60.0, -0.1332047592); wg = 288.1221695283 * Math.pow(t - 60.0, -0.0755148492); }
-        if (t >= 66.0) wb = 255.0;
-        else if (t <= 19.0) wb = 0.0;
-        else wb = 138.5177312231 * Math.log(t - 10.0) - 305.0447927307;
-        wr = Math.max(wr, 1e-3); wg = Math.max(wg, 1e-3); wb = Math.max(wb, 1e-3);
-        // Ratio of the white point is what matters (shader divides by it).
+      for (let i = 0; i < WB_LUT.length; i++) {
+        const { wr, wg, wb } = WB_LUT[i];
         const err = Math.abs(r / g - wr / wg) + Math.abs(b / g - wb / wg);
-        if (err < bestErr) { bestErr = err; bestK = k; }
+        if (err < bestErr) { bestErr = err; bestK = WB_LUT[i].k; }
       }
 
       postUniforms.temperature = bestK;
@@ -753,13 +862,6 @@ const sliderMap = [
         container.appendChild(overlay);
       });
     }
-    if (autoAlignBtn) {
-      autoAlignBtn.addEventListener('click', () => {
-        cfg.autoAlign = !cfg.autoAlign;
-        autoAlignBtn.classList.toggle('active', cfg.autoAlign);
-        if (currentImg) { scheduleContentAwareSeam(); markStitchDirty(); renderPano(); }
-      });
-    }
     if (seamBtn) {
       seamBtn.addEventListener('click', () => {
         showSeam = !showSeam;
@@ -844,7 +946,6 @@ const sliderMap = [
     }
 
     // Update toggle buttons (not part of sliderMap)
-    if (autoAlignBtn) autoAlignBtn.classList.toggle('active', cfg.autoAlign);
     if (mirror3DBtn) mirror3DBtn.classList.toggle('active', cfg.mirror3D);
     if (schematicBtn) schematicBtn.classList.toggle('active', schematicMode);
     if (seamBtn) seamBtn.classList.toggle('active', showSeam);
@@ -904,7 +1005,6 @@ const sliderMap = [
     seamWidth:       'Width of the seam blend zone (0-100). Wider = smoother transition but more ghosting risk.',
     seamShift:       'Manual offset of the automatic seam position. Positive shifts toward the left lens.',
     schematicBtn:    'Show the lens geometry overlay on the source image.',
-    autoAlignBtn:     'Automatically optimise lens geometry to minimise overlap error. Disable for moving subjects like trees or water.',
     seamBtn:         'Highlight the seam blend zone in the stitched output.',
     mirror3DBtn:     'Mirror the 3D spherical view horizontally.',
     resetTrapBtn:    'Reset all trapezoid alignment sliders to zero.',
@@ -990,6 +1090,7 @@ const sliderMap = [
       try { S360._schematicBg.close(); } catch (_) {}
     }
     S360._schematicBg = null;
+    invalidateSchematicBgCache();
   }
 
   // Disable lens-geometry / lens-calibration controls when the current source is
@@ -1002,7 +1103,6 @@ const sliderMap = [
       g.querySelectorAll('input, button').forEach(el => { el.disabled = isStitched; });
     });
     if (mirror3DBtn) mirror3DBtn.disabled = false;
-    if (autoAlignBtn) autoAlignBtn.disabled = false;
   }
 
   if (imageLoader) imageLoader.addEventListener('change', onFile, false);
@@ -1059,24 +1159,18 @@ const sliderMap = [
       const longest = Math.max(img.width, img.height);
       if (longest > MAX_SOURCE_DIM) {
         const scale = MAX_SOURCE_DIM / longest;
-        const off = document.createElement('canvas');
-        off.width = Math.round(img.width * scale);
-        off.height = Math.round(img.height * scale);
-        const ctx = off.getContext('2d');
-        ctx.drawImage(img, 0, 0, off.width, off.height);
-        img = off;
+         const off = document.createElement('canvas');
+         off.width = Math.round(img.width * scale);
+         off.height = Math.round(img.height * scale);
+         const ctx2d = off.getContext('2d');
+         ctx2d.drawImage(img, 0, 0, off.width, off.height);
+         img = off;
       }
 
       setLoading(true, 'Stitching panorama in WebGL...');
       currentImg = img;
       releaseSchematicBg();
 
-      // Auto-calibrate: optimise lens geometry to minimise overlap error so
-      // both views agree before the seam ever sees them.
-      if (cfg.autoAlign) {
-        setLoading(true, 'Auto-calibrating lens alignment...');
-        S360.autoCalibrateOverlap(img, cfg);
-      }
       S360.settings.updateUIFromConfig(ctx);
       S360.settings.scheduleLiveSave(ctx);
       drawLensSchematic();
@@ -1253,16 +1347,18 @@ const sliderMap = [
       return;
     }
 
-    // ---- FULL RESOLUTION PASS ----
-    if (postEnabled && !schematicMode) {
-      renderWithPostProcessing(panoW, panoH);
-    } else if (isStitched) {
-      copyStitched(panoW, panoH, null);
-      _fboValid = false; // post-off path draws straight to canvas; FBO is now stale
-    } else {
-      stitchWebGL(currentImg.width, currentImg.height, panoW, panoH, null, false);
-      _fboValid = false; // post-off path draws straight to canvas; FBO is now stale
-    }
+     // ---- FULL RESOLUTION PASS ----
+     if (postEnabled && !schematicMode) {
+       renderWithPostProcessing(panoW, panoH);
+     } else if (isStitched) {
+       copyStitched(panoW, panoH, null);
+       _fboValid = false; // post-off path draws straight to canvas; FBO is now stale
+     } else {
+       // Ensure the LF texture is available before the stitch shader binds it.
+       if (!lfTex && currentTexture && currentImg) buildLFTexture();
+        stitchWebGL(currentImg.width, currentImg.height, panoW, panoH, null, false);
+        _fboValid = false; // post-off path draws straight to canvas; FBO is now stale
+      }
 
     S360.scheduleViewerUpdate(ctx);
   }
@@ -1305,6 +1401,7 @@ const sliderMap = [
   // first, to free GPU memory without destroying the source or stitch textures.
   function _shedNonEssentials(_gl, _needed) {
     let freed = 0;
+    let stitchDirty = false;
     // 1. Lum blur cache — cheapest to rebuild (just re-renders two blur passes).
     //    invalidateBlurCache is defined in webgl-utils.js's closure and handles
     //    its own _lumBlur tracking + deletion.
@@ -1316,12 +1413,12 @@ const sliderMap = [
     // 2. LF texture — force a rebuild on the next stitch so stale data is
     //    discarded.  The pool still owns the GPU textures (no bytes freed yet);
     //    pool LRU eviction handles the actual deallocation.
-    if (lfTex) {
-      lfTex = null; lfFbo = null;
-      lfTmpTex = null; lfTmpFbo = null;
-      _stitchDirty = true;
-      console.log(`🎮 Shed LF texture refs (will rebuild on next stitch)`);
-    }
+   if (lfTex) {
+       lfTex = null; lfFbo = null;
+       lfTmpTex = null; lfTmpFbo = null;
+       stitchDirty = true;
+       console.log(`🎮 Shed LF texture refs (will rebuild on next stitch)`);
+     }
     // 3. Watermark FBO (export compositing target) — only needed during export.
     if (wmFbo) {
       const bytes = wmFboW * wmFboH * 4;
@@ -1331,26 +1428,33 @@ const sliderMap = [
       freed += bytes;
       console.log(`🎮 Shed watermark export FBO: freed ${(bytes / 1048576).toFixed(1)} MiB`);
     }
-    // 4. Viewer full-res textures — only needed while in 3D view with watermark.
-    if (viewMode !== '3d' && S360.viewerShared) {
-      const S = S360.viewerShared;
-      if (S.panoFullTex) {
-        const bytes = (S.panoFullW || 0) * (S.panoFullH || 0) * 4;
-        _gl.deleteTexture(S.panoFullTex); _gl.deleteFramebuffer(S.panoFullFbo);
-        S.panoFullTex = null; S.panoFullFbo = null; S.panoFullW = 0; S.panoFullH = 0;
-        freed += bytes;
-        console.log(`🎮 Shed viewer full-res: freed ${(bytes / 1048576).toFixed(1)} MiB`);
-      }
-      if (S.panoWMTex) {
-        const bytes = (S.panoFullW || 0) * (S.panoFullH || 0) * 4;
-        _gl.deleteTexture(S.panoWMTex); _gl.deleteFramebuffer(S.panoWMFbo);
-        S.panoWMTex = null; S.panoWMFbo = null;
-        freed += bytes;
-        console.log(`🎮 Shed viewer watermarked: freed ${(bytes / 1048576).toFixed(1)} MiB`);
-      }
+   // 4. Viewer full-res textures — only needed while in 3D view with watermark.
+     if (S360.viewerShared) {
+       const S = S360.viewerShared;
+       const wmW = S.panoFullW || 0;
+       const wmH = S.panoFullH || 0;
+       if (S.panoFullTex) {
+         const bytes = wmW * wmH * 4;
+         _gl.deleteTexture(S.panoFullTex); _gl.deleteFramebuffer(S.panoFullFbo);
+         S.panoFullTex = null; S.panoFullFbo = null; S.panoFullW = 0; S.panoFullH = 0;
+         freed += bytes;
+         stitchDirty = true;
+         console.log(`🎮 Shed viewer full-res: freed ${(bytes / 1048576).toFixed(1)} MiB`);
+       }
+       if (S.panoWMTex) {
+         // panoFullW/H may have been zeroed above, so use the snapshot captured
+         // before that block.
+         const bytes = wmW * wmH * 4;
+         _gl.deleteTexture(S.panoWMTex); _gl.deleteFramebuffer(S.panoWMFbo);
+         S.panoWMTex = null; S.panoWMFbo = null;
+         freed += bytes;
+         console.log(`🎮 Shed viewer watermarked: freed ${(bytes / 1048576).toFixed(1)} MiB`);
+       }
+    }
+    if (stitchDirty) {
+      _stitchDirty = true; // force re-stitch only when stitch-relevant caches were shed
     }
     if (freed > 0) {
-      _stitchDirty = true; // force re-stitch after shedding
       console.log(`🎮 Total shed: ${(freed / 1048576).toFixed(1)} MiB`);
     }
   }
@@ -1434,7 +1538,7 @@ const sliderMap = [
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, currentTexture);
     gl.uniform1i(copyProgram._u.u_tex, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, targetFbo ? framebuffer : null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, targetFbo || null);
     gl.viewport(0, 0, panoW, panoH);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1443,10 +1547,13 @@ const sliderMap = [
   // Re-stitches the source into the offscreen FBO only when geometry/lens/size
   // changed, so cheap post-processing passes never pay for a full re-stitch.
   function stitchIfNeeded(panoW, panoH, forceNormal = false) {
-    const needRealloc = !renderTexture || renderTexture.width !== panoW || renderTexture.height !== panoH;
-    if (needRealloc || !_fboValid || _stitchDirty) {
-      if (needRealloc) allocateStitchTarget(panoW, panoH);
-      gl.viewport(0, 0, panoW, panoH);
+     const needRealloc = !renderTexture || renderTexture.width !== panoW || renderTexture.height !== panoH;
+     if (needRealloc || !_fboValid || _stitchDirty) {
+       if (needRealloc) allocateStitchTarget(panoW, panoH);
+       // Rebuild the LF (low-frequency blur) texture if it was shed by the memory
+       // manager or never built — the stitch shader binds it as a required sampler.
+       if (!lfTex && currentTexture && currentImg) buildLFTexture();
+       gl.viewport(0, 0, panoW, panoH);
       if (isStitched) copyStitched(panoW, panoH, framebuffer);
       else stitchWebGL(currentImg.width, currentImg.height, panoW, panoH, true, forceNormal);
       _fboValid = true;
@@ -1514,17 +1621,22 @@ const sliderMap = [
   //  Small canvas under Lens Geometry showing the dual-fisheye source with
   //  line-art overlays: lens circles, trapezoid edges, and seam lines.
   // -------------------------------------------------------------------------
-  function drawLensSchematic(target) {
-    const c = target ? target.canvas : lensSchematicCanvas;
-    if (!c) return;
-    const ctx2d = target ? target.ctx : c.getContext('2d');
-    const W = c.width, H = c.height;
-    ctx2d.clearRect(0, 0, W, H);
+  function invalidateSchematicBgCache() {
+    schematicBgCacheValid = false;
+    if (schematicBgCache) {
+      const c = schematicBgCache;
+      schematicBgCache = null;
+      c.width = 0; c.height = 0;
+    }
+  }
+
+  function buildSchematicBgCache(W, H) {
+    const cache = document.createElement('canvas');
+    cache.width = W; cache.height = H;
+    const ctx2d = cache.getContext('2d');
     ctx2d.fillStyle = '#000';
     ctx2d.fillRect(0, 0, W, H);
 
-    // Draw the actual source image if available.
-    // After merges, currentImg is a GPU image object (not drawable) — use stored background.
     const bgImg = (currentImg && currentImg.width > 0 && currentImg.height > 0 && !currentImg.isGpuImage)
       ? currentImg : S360._schematicBg;
     if (bgImg && bgImg.width > 0 && bgImg.height > 0) {
@@ -1535,6 +1647,33 @@ const sliderMap = [
       else { dh = H; dw = H * srcAspect; dx = (W - dw) / 2; dy = 0; }
       ctx2d.drawImage(bgImg, dx, dy, dw, dh);
     }
+
+    // Grid lines at 0.25 and 0.75 (static).
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx2d.lineWidth = 1;
+    ctx2d.setLineDash([4, 4]);
+    ctx2d.beginPath();
+    ctx2d.moveTo(W * 0.25, 0); ctx2d.lineTo(W * 0.25, H);
+    ctx2d.moveTo(W * 0.75, 0); ctx2d.lineTo(W * 0.75, H);
+    ctx2d.stroke();
+    ctx2d.setLineDash([]);
+
+    schematicBgCache = cache;
+    schematicBgCacheValid = true;
+  }
+
+  function drawLensSchematic(target) {
+    const c = target ? target.canvas : lensSchematicCanvas;
+    if (!c) return;
+    const ctx2d = target ? target.ctx : c.getContext('2d');
+    const W = c.width, H = c.height;
+
+    if (!schematicBgCacheValid || !schematicBgCache || schematicBgCache.width !== W || schematicBgCache.height !== H) {
+      buildSchematicBgCache(W, H);
+    }
+
+    ctx2d.clearRect(0, 0, W, H);
+    if (schematicBgCache) ctx2d.drawImage(schematicBgCache, 0, 0);
 
     // Source-image geometry (normalised 0-1).
     const cxL = cfg.centers.left[0],  cyL = cfg.centers.left[1];
@@ -1599,16 +1738,6 @@ const sliderMap = [
     drawLens(cxR, cyR, cfg.height.rl / 100, cfg.height.rr / 100,
              cfg.centerOffset.rl, cfg.centerOffset.rr);
 
-    // Seam lines at 0.25 and 0.75 (overlap boundaries).
-    ctx2d.strokeStyle = 'rgba(255,255,255,0.25)';
-    ctx2d.lineWidth = 2 * lw;
-    ctx2d.setLineDash([4 * lw, 4 * lw]);
-    ctx2d.beginPath();
-    ctx2d.moveTo(W * 0.25, 0); ctx2d.lineTo(W * 0.25, H);
-    ctx2d.moveTo(W * 0.75, 0); ctx2d.lineTo(W * 0.75, H);
-    ctx2d.stroke();
-    ctx2d.setLineDash([]);
-
     // Also render to the overlay if it's open (live updates when sliders change).
     // Only recurse from the thumbnail draw, not from the overlay draw itself.
     if (!target && S360._schematicOverlayTarget) drawLensSchematic(S360._schematicOverlayTarget);
@@ -1632,6 +1761,7 @@ const sliderMap = [
     framebuffer = null;
     schematicGuideX = -1.0; // guide is per-file/session
     schematicGuideY = -1.0;
+    invalidateSchematicBgCache();
     // Recreate texture at correct size — texStorage2D allocates immutable storage
     // so we must re-create if dimensions change.
     if (currentTexture) gl.deleteTexture(currentTexture);
@@ -1955,7 +2085,7 @@ let srcTex, srcFbo = framebuffer; // raw stitched result, already off-screen
 
         currentImg = blendedCanvas;
         uploadTexture(blendedCanvas);
-        try { releaseSchematicBg(); S360._schematicBg = await loadImageFromFile(files[0]); } catch (_) {}
+        try { releaseSchematicBg(); S360._schematicBg = await loadImageFromFile(files[analysis.referenceIndex]); } catch (_) {}
 
         await new Promise(requestAnimationFrame);
         renderPano();
@@ -1998,8 +2128,9 @@ let srcTex, srcFbo = framebuffer; // raw stitched result, already off-screen
 
         currentImg = hdrCanvas;
         uploadTexture(hdrCanvas);
-        // Grab first frame for schematic background (merge result is a GPU image, not drawable).
-        try { releaseSchematicBg(); S360._schematicBg = await loadImageFromFile(files[0]); } catch (_) {}
+        // Use the analysis reference frame for schematic background (avoids
+        // blown-out first exposures in HDR sequences).
+        try { releaseSchematicBg(); S360._schematicBg = await loadImageFromFile(files[analysis.referenceIndex]); } catch (_) {}
 
         await new Promise(requestAnimationFrame);
         renderPano();

@@ -186,6 +186,25 @@ window.S360 = window.S360 || {};
       bool hit;
   };
 
+  vec2 projectLens(vec3 v, vec3 axis, vec3 up, vec3 right, vec2 center,
+                   float heightL, float heightR, float centerOffL, float centerOffR) {
+      float dotAxis = dot(v, axis);
+      float theta = acos(clamp(dotAxis, -1.0, 1.0));
+      float vu = dot(v, up);
+      float vr = dot(v, right);
+      float az = atan(vr, vu);
+      float dist = u_f * theta;
+      float ht = (sin(az) + 1.0) * 0.5;
+      float hf = mix(heightL, heightR, ht);
+      float wL = pow(max(0.0, 1.0 - 2.0 * ht), 3.0);
+      float wR = pow(max(0.0, 2.0 * ht - 1.0), 3.0);
+      float co = (centerOffL * wL + centerOffR * wR) * u_srcSize.y * 0.01;
+      float radialFade = theta / u_halfFov;
+      radialFade *= radialFade;
+      vec2 d = vec2(dist * sin(az), -dist * cos(az) / hf + co * radialFade);
+      return center + d;
+  }
+
   LensResult mapLens(vec3 v, vec3 axis, vec3 up, vec3 right, vec2 center,
                       float heightL, float heightR, float centerOffL, float centerOffR) {
       LensResult res;
@@ -198,28 +217,12 @@ window.S360 = window.S360 || {};
       float dotAxis = dot(v, axis);
       float theta = acos(clamp(dotAxis, -1.0, 1.0));
       if (theta > u_halfFov) return res;
-      float vu = dot(v, up);
-      float vr = dot(v, right);
-      float az = atan(vr, vu);
-      float dist = u_f * theta;
-      // Trapezoid: interpolate height across the full hemisphere but
-      // limit each centre offset to its own half with a power curve
-      // so the centre barely moves and edges move most.
-      float ht = (sin(az) + 1.0) * 0.5;
-      float hf = mix(heightL, heightR, ht);
-      float wL = pow(max(0.0, 1.0 - 2.0 * ht), 3.0);
-      float wR = pow(max(0.0, 2.0 * ht - 1.0), 3.0);
-      float co = (centerOffL * wL + centerOffR * wR) * u_srcSize.y * 0.01;
-      // Radial falloff: zero at lens centre, grows quadratically toward edge.
-      float radialFade = theta / u_halfFov;
-      radialFade *= radialFade;
-      vec2 d = vec2(dist * sin(az), -dist * cos(az) / hf + co * radialFade);
-      vec2 s = center + d;
-      if (dot(d, d) > u_radius * u_radius) return res;
+      vec2 s = projectLens(v, axis, up, right, center, heightL, heightR, centerOffL, centerOffR);
+      if (dot(s - center, s - center) > u_radius * u_radius) return res;
       res.sxsy = s;
       res.w = clamp(1.0 - (theta / u_halfFov), 0.0, 1.0);
       res.theta = theta;
-      res.az = az;
+      res.az = atan(dot(v, right), dot(v, up));
       res.hit = true;
       return res;
   }
@@ -422,32 +425,15 @@ window.S360 = window.S360 || {};
           fragColor = vec4(colorR_raw, 1.0);
       } else {
           bool useRight = v.x >= 0.0;
-          vec3 axis = useRight ? u_axisR : u_axisL;
-          vec3 up = useRight ? u_upR : u_upL;
-          vec3 right = useRight ? u_rightR : u_rightL;
-          vec2 center = useRight ? u_centersR : u_centersL;
-
-          float vu = dot(v, up);
-          float vr = dot(v, right);
-          float theta = acos(clamp(dot(v, axis), -1.0, 1.0));
-          float az = atan(vr, vu);
-          float dist = u_f * theta;
-          float ht = (sin(az) + 1.0) * 0.5;
-          float hfFallback, coFallback;
-          if (useRight) {
-            hfFallback = mix(u_heightRL / 100.0, u_heightRR / 100.0, ht);
-            float wLr = pow(max(0.0, 1.0 - 2.0 * ht), 3.0);
-            float wRr = pow(max(0.0, 2.0 * ht - 1.0), 3.0);
-            coFallback = (u_centerRL * wLr + u_centerRR * wRr) * u_srcSize.y * 0.01;
-          } else {
-            hfFallback = mix(u_heightLL / 100.0, u_heightLR / 100.0, ht);
-            float wLl = pow(max(0.0, 1.0 - 2.0 * ht), 3.0);
-            float wRl = pow(max(0.0, 2.0 * ht - 1.0), 3.0);
-            coFallback = (u_centerLL * wLl + u_centerLR * wRl) * u_srcSize.y * 0.01;
-          }
-          float radialFade = theta / u_halfFov; radialFade *= radialFade;
-          vec2 d = vec2(dist * sin(az), -dist * cos(az) / hfFallback + coFallback * radialFade);
-          vec2 s = center + d;
+          vec2 s = projectLens(v,
+              useRight ? u_axisR : u_axisL,
+              useRight ? u_upR : u_upL,
+              useRight ? u_rightR : u_rightL,
+              useRight ? u_centersR : u_centersL,
+              useRight ? u_heightRL / 100.0 : u_heightLL / 100.0,
+              useRight ? u_heightRR / 100.0 : u_heightLR / 100.0,
+              useRight ? u_centerRL : u_centerLL,
+              useRight ? u_centerRR : u_centerLR);
           vec3 color = sampleSource(s).rgb;
           if (useRight) color = clamp(color * u_gainR, 0.0, 1.0);
           fragColor = vec4(color, 1.0);

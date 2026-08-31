@@ -4,6 +4,25 @@ window.S360 = window.S360 || {};
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const srgbToLinear = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
 
+  function medianQuickSelect(arr) {
+    if (!arr.length) return 0.5;
+    const k = arr.length >> 1;
+    let lo = 0, hi = arr.length - 1;
+    while (lo < hi) {
+      const pivot = arr[lo + ((hi - lo) >> 1)];
+      let i = lo, j = hi;
+      while (i <= j) {
+        while (arr[i] < pivot) i++;
+        while (arr[j] > pivot) j--;
+        if (i <= j) { const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp; i++; j--; }
+      }
+      if (k <= j) hi = j;
+      else if (k >= i) lo = i;
+      else break;
+    }
+    return arr[k];
+  }
+
   function proxyFromImage(img, maxWidth = 640) {
     const w = Math.min(maxWidth, img.width);
     const h = Math.max(1, Math.round(img.height * w / img.width));
@@ -20,16 +39,24 @@ window.S360 = window.S360 || {};
       const r = rgba[i] / 255, g = rgba[i + 1] / 255, b = rgba[i + 2] / 255;
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       gray[p] = lum;
-      if (lum > 0.03 && lum < 0.97 && (x + y) % 5 === 0) values.push(lum);
+      if (lum > 0.03 && lum < 0.97 && x % 5 === 0) values.push(lum);
     }
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
       const p = y * w + x;
       const lap = 4 * gray[p] - gray[p - 1] - gray[p + 1] - gray[p - w] - gray[p + w];
       sharpness += lap * lap;
     }
-    values.sort((a, b) => a - b);
-    const median = values.length ? values[values.length >> 1] : 0.5;
-    return { gray, w, h, sourceW: img.width, sourceH: img.height,
+    const median = medianQuickSelect(values);
+    const gradX = new Float32Array(w * h);
+    const gradY = new Float32Array(w * h);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const p = y * w + x;
+        gradX[p] = gray[p + 1] - gray[p - 1];
+        gradY[p] = gray[p + w] - gray[p - w];
+      }
+    }
+    return { gray, gradX, gradY, w, h, sourceW: img.width, sourceH: img.height,
       sharpness: sharpness / Math.max(1, (w - 2) * (h - 2)), median };
   }
 
@@ -42,14 +69,9 @@ window.S360 = window.S360 || {};
         let cx = x + dx;
         if (wrapX) cx = ((cx % w) + w) % w;
         if (cx < 1 || cx >= w - 1) continue;
-        // Use both gradient axes. Horizontal-only correlation produced strong
-        // false peaks in scenes dominated by vertical edges and repeated detail.
         const rp = y * w + x, cp = cy * w + cx;
-        const rgx = ref.gray[rp + 1] - ref.gray[rp - 1];
-        const rgy = ref.gray[rp + w] - ref.gray[rp - w];
-        const cgx = cur.gray[cp + 1] - cur.gray[cp - 1];
-        const cgy = cur.gray[cp + w] - cur.gray[cp - w];
-        // Correlate gradient vectors as two independent samples.
+        const rgx = ref.gradX[rp], rgy = ref.gradY[rp];
+        const cgx = cur.gradX[cp], cgy = cur.gradY[cp];
         sum += rgx * cgx + rgy * cgy;
         sumR += rgx + rgy; sumC += cgx + cgy;
         sumRR += rgx * rgx + rgy * rgy;

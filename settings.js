@@ -10,7 +10,6 @@ window.S360 = window.S360 || {};
       if (typeof c.fovDeg === 'number') cfg.fovDeg = c.fovDeg;
       if (typeof c.radiusScale === 'number') cfg.radiusScale = c.radiusScale;
       if (typeof c.mirror3D === 'boolean') cfg.mirror3D = c.mirror3D;
-      if (typeof c.autoAlign === 'boolean') cfg.autoAlign = c.autoAlign;
       if (c.blend) cfg.blend = { ...DEFAULT_CFG.blend, ...c.blend };
       if (c.hdr) cfg.hdr = { ...DEFAULT_CFG.hdr, ...c.hdr };
       if (c.centers) {
@@ -79,8 +78,18 @@ window.S360 = window.S360 || {};
   S360.settings.loadLiveConfig = function (ctx) {
     try {
       const saved = localStorage.getItem(ctx.LIVE_KEY);
-      if (saved) S360.settings.applySettings(ctx, JSON.parse(saved));
-    } catch (e) { console.warn("[settings] save failed:", e); }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        S360.settings.applySettings(ctx, parsed);
+      }
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        console.warn(`[settings] Corrupt live config in localStorage (${ctx.LIVE_KEY}); clearing it.`, e);
+        try { localStorage.removeItem(ctx.LIVE_KEY); } catch (_) {}
+      } else {
+        console.warn("[settings] load failed:", e);
+      }
+    }
   };
 
   S360.settings.saveSnapshot = function (ctx) {

@@ -84,7 +84,18 @@ window.S360 = window.S360 || {};
         values.sort((a, b) => a - b);
         return values[values.length >> 1];
       };
-      const gain = ratios.map(v => Math.min(2, Math.max(0.5, median(v))));
+      const gain = ratios.map(v => {
+        if (!v.length) return 1;
+        v.sort((a, b) => a - b);
+        const med = v[v.length >> 1];
+        const mad = v.reduce((s, x) => s + Math.abs(x - med), 0) / v.length;
+        const lo = med - 3.5 * Math.max(mad, 0.02);
+        const hi = med + 3.5 * Math.max(mad, 0.02);
+        const inliers = v.filter(x => x >= lo && x <= hi);
+        if (!inliers.length) return Math.min(2, Math.max(0.5, med));
+        inliers.sort((a, b) => a - b);
+        return Math.min(2, Math.max(0.5, inliers[inliers.length >> 1]));
+      });
       // Circularly smooth costs and choose the quietest seam longitude.
       let seamPhase = 0, best = Infinity;
       for (let a = 0; a < 360; a += 4) {
@@ -248,4 +259,6 @@ window.S360 = window.S360 || {};
   S360.scaleSource = function (gl, img, scaleValue, MAX_TEX_SIZE) {
     return S360.scaleSourceLanczos(gl, img, scaleValue, MAX_TEX_SIZE);
   };
+
+  S360.invalidateLanczosPrograms = function () { _lanczosHProg = null; _lanczosVProg = null; };
 })(window.S360);

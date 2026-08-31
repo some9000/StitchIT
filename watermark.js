@@ -66,7 +66,7 @@ window.S360 = window.S360 || {};
 
   // Drops all cached watermark programs (context-loss recovery).
   S360.invalidateWatermarkPrograms = function () {
-      for (const s of wmProgramCaches) s.prog = null;
+    wmProgramCaches.length = 0;
   };
 
   // ---------------------------------------------------------------------------

@@ -150,8 +150,10 @@ window.S360 = window.S360 || {};
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, gpuImage.texture);
       gl.uniform1i(_proxyCopyProgram._u, 0); gl.viewport(0, 0, w, h);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
-      const canvas = S360.readFboToCanvas(gl, fbo, w, h, Math.min(256, h));
-      gl.deleteTexture(tex); gl.deleteFramebuffer(fbo);
+      const tileH = Math.max(1, Math.min(1024, h));
+      const canvas = S360.readFboToCanvas(gl, fbo, w, h, tileH);
+      gl.deleteTexture(tex);
+      gl.deleteFramebuffer(fbo);
       return canvas;
   };
 
@@ -291,26 +293,24 @@ window.S360 = window.S360 || {};
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext('2d');
-      const img = ctx.createImageData(w, h);
-      const data = img.data;
-      const rowBytes = w * 4;
       const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
       const prevVp = gl.getParameter(gl.VIEWPORT);
       gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
       gl.viewport(0, 0, w, h);
+      const flipBuf = new Uint8Array(w * 4 * tileH);
+      const rowBytes = w * 4;
       for (let y = 0; y < h; y += tileH) {
-          const th = Math.min(tileH, h - y);
-          const tile = new Uint8Array(rowBytes * th);
-          gl.readPixels(0, y, w, th, gl.RGBA, gl.UNSIGNED_BYTE, tile);
-          for (let j = 0; j < th; j++) {
-              const srcOff = j * rowBytes;
-              const dstOff = (h - 1 - (y + j)) * rowBytes;
-              data.set(tile.subarray(srcOff, srcOff + rowBytes), dstOff);
-          }
+        const th = Math.min(tileH, h - y);
+        const tile = new Uint8Array(rowBytes * th);
+        gl.readPixels(0, y, w, th, gl.RGBA, gl.UNSIGNED_BYTE, tile);
+        for (let j = 0; j < th; j++) {
+          flipBuf.set(tile.subarray(j * rowBytes, (j + 1) * rowBytes), (th - 1 - j) * rowBytes);
+        }
+        const dstY = h - y - th;
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(flipBuf.subarray(0, rowBytes * th)), w, th), 0, dstY);
       }
       gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
       gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
-      ctx.putImageData(img, 0, 0);
       return canvas;
   };
 

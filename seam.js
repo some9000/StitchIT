@@ -32,6 +32,8 @@ window.S360 = window.S360 || {};
     return { w, h, data: ctx.getImageData(0, 0, w, h).data, scale: w / img.width };
   }
 
+  S360.makeProxy = makeProxy;
+
   function sampleBilinear(proxy, x, y) {
     x = clamp(x, 0, proxy.w - 1); y = clamp(y, 0, proxy.h - 1);
     const x0 = Math.floor(x), y0 = Math.floor(y);
@@ -83,6 +85,39 @@ window.S360 = window.S360 || {};
     const gx = -tl - 2*ml - bl + tr + 2*mr + br;
     const gy = -tl - 2*t  - tr + bl + 2*b  + br;
     return Math.sqrt(gx * gx + gy * gy);
+  }
+
+  function distanceTransformQuadratic(f, s, argmin) {
+    const n = f.length;
+    const d = new Float64Array(n);
+    const v = new Int32Array(n);
+    const z = new Float64Array(n + 1);
+
+    let k = 0;
+    v[0] = 0;
+    z[0] = -Infinity;
+    z[1] = Infinity;
+
+    for (let q = 1; q < n; q++) {
+      let sVal = (f[q] - f[v[k]]) / (2 * s * (q - v[k])) + (q + v[k]) / 2;
+      while (sVal <= z[k]) {
+        k--;
+        sVal = (f[q] - f[v[k]]) / (2 * s * (q - v[k])) + (q + v[k]) / 2;
+      }
+      k++;
+      v[k] = q;
+      z[k] = sVal;
+      z[k + 1] = Infinity;
+    }
+
+    k = 0;
+    for (let q = 0; q < n; q++) {
+      while (z[k + 1] < q) k++;
+      d[q] = s * (q - v[k]) * (q - v[k]) + f[v[k]];
+      if (argmin) argmin[q] = v[k];
+    }
+
+    return d;
   }
 
   // Finds a smooth closed path through the overlap belt. The result is one
@@ -159,20 +194,27 @@ window.S360 = window.S360 || {};
       previous[start] = costs[0][start];
       const parents = Array.from({ length: angles }, () => new Int16Array(levels));
       for (let a = 1; a < angles; a++) {
-        const next = new Float64Array(levels); next.fill(Infinity);
+        const next = new Float64Array(levels);
         // Adaptive smoothness: in regions with strong edges (high average
         // gradient), reduce the penalty so the seam can make sharper turns
         // to route around objects.  In smooth regions, increase it.
         const normEdge = Math.min(1, azEdgeStrength[a] / 0.3);
         const localSmooth = baseSmoothness * (1.0 + 1.5 * (1.0 - normEdge));
-        for (let level = 0; level < levels; level++) {
-          let value = Infinity, parent = 0;
-          for (let prior = 0; prior < levels; prior++) {
-            const candidate = previous[prior] + localSmooth * (level - prior) * (level - prior);
-            if (candidate < value) { value = candidate; parent = prior; }
+        if (a === 1) {
+          // First transition: only 'start' is reachable in previous.
+          for (let level = 0; level < levels; level++) {
+            next[level] = previous[start] + localSmooth * (level - start) * (level - start);
+            parents[a][level] = start;
           }
-          next[level] = value + costs[a][level];
-          parents[a][level] = parent;
+        } else {
+          const argmin = parents[a];
+          const dt = distanceTransformQuadratic(previous, localSmooth, argmin);
+          for (let level = 0; level < levels; level++) {
+            next[level] = dt[level];
+          }
+        }
+        for (let level = 0; level < levels; level++) {
+          next[level] += costs[a][level];
         }
         previous = next;
       }
@@ -193,139 +235,5 @@ window.S360 = window.S360 || {};
     }
 
     return { curve, angles, score: bestScore / angles };
-  };
-
-  // =========================================================================
-  //  AUTO-CALIBRATE LENS PARAMETERS VIA OVERLAP OPTIMISATION
-  // =========================================================================
-  // Coordinate-descent over 6 parameters: height and centre-Y for each lens,
-  // plus shared FOV and radius-scale.  The cost is the mean squared RGB
-  // difference between the two views across the overlap zone, evaluated on
-  // the same 640 px proxy the seam analysis uses, with a lightweight
-  // regularisation penalty to keep the solution conservative.
-  //
-  // If the initial overlap MSE is already very low the lenses are
-  // well-aligned and calibration is skipped entirely.
-  S360.autoCalibrateOverlap = function (img, cfg) {
-    if (!img?.width || !img?.height) return;
-
-    const proxy = makeProxy(img, 640);
-
-    function evalCost() {
-      const hf = cfg.fovDeg * PI / 360;
-      const f  = proxy.w / (2 * hf);
-      const r  = proxy.w * cfg.radiusScale / 2;
-      const L  = lensBasis(false, cfg);
-      const R  = lensBasis(true, cfg);
-      const cL = [cfg.centers.left[0]  * proxy.scale, cfg.centers.left[1]  * proxy.scale];
-      const cR = [cfg.centers.right[0] * proxy.scale, cfg.centers.right[1] * proxy.scale];
-      const hLL = cfg.height.ll / 100, hLR = cfg.height.lr / 100;
-      const hRL = cfg.height.rl / 100, hRR = cfg.height.rr / 100;
-      const cLL = cfg.centerOffset.ll, cLR = cfg.centerOffset.lr;
-      const cRL = cfg.centerOffset.rl, cRR = cfg.centerOffset.rr;
-      const seamExtra = (cfg.blend && cfg.blend.hfBandWidth) || 0;
-      const tMin = Math.max(0.01, PI - hf - seamExtra);
-      const tMax = Math.min(hf + seamExtra, PI - 0.01);
-      let err = 0, n = 0;
-      for (let a = 0; a < 128; a++) {
-        const az = -PI + (a + 0.5) * TAU / 128;
-        for (let t = 0; t < 16; t++) {
-          const theta = tMin + t * (tMax - tMin) / 15;
-          const st = Math.sin(theta), ct = Math.cos(theta);
-          const v = [
-            L.axis[0]*ct + L.up[0]*st*Math.cos(az) + L.right[0]*st*Math.sin(az),
-            L.axis[1]*ct + L.up[1]*st*Math.cos(az) + L.right[1]*st*Math.sin(az),
-            L.axis[2]*ct + L.up[2]*st*Math.cos(az) + L.right[2]*st*Math.sin(az)
-          ];
-          const pL = sourcePoint(v, L, cL, r, hf, f, hLL, hLR, cLL, cLR, proxy.h);
-          const pR = sourcePoint(v, R, cR, r, hf, f, hRL, hRR, cRL, cRR, proxy.h);
-          if (!pL || !pR) continue;
-          const sL = sampleBilinear(proxy, pL.x, pL.y);
-          const sR = sampleBilinear(proxy, pR.x, pR.y);
-          const d0 = sL[0]-sR[0], d1 = sL[1]-sR[1], d2 = sL[2]-sR[2];
-          err += d0*d0 + d1*d1 + d2*d2;
-          n++;
-        }
-      }
-      return n > 0 ? err / n : 1e10;
-    }
-
-    const initCost = evalCost();
-
-    // If the overlap is already very tight, don't touch anything — the
-    // optimizer would just be fitting to content differences / parallax.
-    if (initCost < 0.001) {
-      return;
-    }
-
-    // Snapshot original values for regularisation.
-    const orig = {
-      ll: cfg.height.ll, lr: cfg.height.lr,
-      rl: cfg.height.rl, rr: cfg.height.rr,
-      cll: cfg.centerOffset.ll, clr: cfg.centerOffset.lr,
-      crl: cfg.centerOffset.rl, crr: cfg.centerOffset.rr,
-      cL: cfg.centers.left[0], cR: cfg.centers.right[0],
-      fov: cfg.fovDeg, radius: cfg.radiusScale
-    };
-
-    // Regularised cost: raw MSE + penalty for deviating from original values.
-    function evalRegCost() {
-      const raw = evalCost();
-      const reg = 0.1 * (
-        Math.pow((cfg.height.ll     - orig.ll), 2) +
-        Math.pow((cfg.height.lr     - orig.lr), 2) +
-        Math.pow((cfg.height.rl     - orig.rl), 2) +
-        Math.pow((cfg.height.rr     - orig.rr), 2) +
-        Math.pow((cfg.centerOffset.ll - orig.cll), 2) +
-        Math.pow((cfg.centerOffset.lr - orig.clr), 2) +
-        Math.pow((cfg.centerOffset.rl - orig.crl), 2) +
-        Math.pow((cfg.centerOffset.rr - orig.crr), 2) +
-        Math.pow((cfg.centers.left[0] - orig.cL) * 100, 2) +
-        Math.pow((cfg.centers.right[0]- orig.cR) * 100, 2) +
-        Math.pow((cfg.fovDeg          - orig.fov)   * 5, 2) +
-        Math.pow((cfg.radiusScale     - orig.radius) * 100, 2)
-      );
-      return raw + reg;
-    }
-
-    function g(path) { let o = cfg; for (const p of path) o = o[p]; return o; }
-    function s(path, v) {
-      let o = cfg; for (let i = 0; i < path.length - 1; i++) o = o[path[i]];
-      o[path[path.length - 1]] = v;
-    }
-
-    // Optimise the 6 geometry parameters.  Centre X and roll stay at
-    // defaults — they are not exposed in the UI and don't meaningfully
-    // affect vertical seam alignment.
-    const params = [
-      { p: ['height','ll'],         d: [-3,-1,-0.5, 0, 0.5, 1, 3] },
-      { p: ['height','lr'],         d: [-3,-1,-0.5, 0, 0.5, 1, 3] },
-      { p: ['height','rl'],         d: [-3,-1,-0.5, 0, 0.5, 1, 3] },
-      { p: ['height','rr'],         d: [-3,-1,-0.5, 0, 0.5, 1, 3] },
-      { p: ['centerOffset','ll'],   d: [-1,-0.3,-0.1, 0, 0.1, 0.3, 1] },
-      { p: ['centerOffset','lr'],   d: [-1,-0.3,-0.1, 0, 0.1, 0.3, 1] },
-      { p: ['centerOffset','rl'],   d: [-1,-0.3,-0.1, 0, 0.1, 0.3, 1] },
-      { p: ['centerOffset','rr'],   d: [-1,-0.3,-0.1, 0, 0.1, 0.3, 1] },
-      { p: ['centers','left', 0],   d: [-0.005,-0.002,-0.001, 0, 0.001, 0.002, 0.005] },
-      { p: ['centers','right', 0],  d: [-0.005,-0.002,-0.001, 0, 0.001, 0.002, 0.005] },
-      { p: ['fovDeg'],              d: [-1,-0.3,-0.1, 0, 0.1, 0.3, 1] },
-      { p: ['radiusScale'],         d: [-0.01,-0.003,-0.001, 0, 0.001, 0.003, 0.01] },
-    ];
-
-    let bestCost = evalRegCost();
-
-    for (let pass = 0; pass < 3; pass++) {
-      for (const { p, d } of params) {
-        const origVal = g(p);
-        let bestVal = origVal;
-        for (const delta of d) {
-          s(p, origVal + delta);
-          const cost = evalRegCost();
-          if (cost < bestCost) { bestCost = cost; bestVal = origVal + delta; }
-        }
-        s(p, bestVal);
-      }
-    }
-
   };
 })(window.S360);
