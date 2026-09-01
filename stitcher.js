@@ -8,6 +8,20 @@
  *  - Interactive 360° Spherical WebGL2 Viewer (in-place texture updates, no flash)
  *  - Exposure Weighted HDR Exposure Fusion Pipeline
  *  - Full-resolution rendering with WebGL2 VAO and immutable textures
+ *
+ * FILE STRUCTURE (approximate line ranges — for future refactoring):
+ *   1–115    : Shader sources (COPY_VS/FS, LITTLE_PLANET, WB_LUT)
+ *   121–560  : DOM bindings, state variables, config defaults, ctx object
+ *   560–1090 : UI event handlers (sliders, buttons, HDR bell, schematic, WB)
+ *   1092–1170: Welcome overlay, resize handler, setLoading/setActionsVisible
+ *   1170–1340: File loading orchestration (onFile, loadDualFisheye, loadBlend, loadHdr, loadStitched)
+ *   1341–1395: Preview size computation (computePreviewSize)
+ *   1396–1610: Core render pipeline (renderPano, progressive rendering, scheduleRender)
+ *   1611–1770: WebGL stitch pipeline (buildLFTexture, allocateStitchTarget, stitchWebGL, renderWithPostProcessing)
+ *   1771–1920: Lens schematic preview, uploadTexture, white-balance sampling
+ *   1920–2100: Stitch shader setup & uniform upload
+ *   2100–2400: Export functions (readFboToCanvas, renderOffscreenPixels, little planet, downloads)
+ *   2400–2603: Additional file loaders and event wiring
  */
 
 // ===========================================================================
@@ -66,6 +80,84 @@ const { BLUR_VS, BLUR_FS, LANCZOS_VS, LANCZOS_H_FS, LANCZOS_V_FS, VS_SOURCE, FS_
     uniform sampler2D u_tex;
     void main() { fragColor = texture(u_tex, vec2(v_uv.x, 1.0 - v_uv.y)); }`;
 
+  // Equidistant "little planet" projection: equirectangular -> square.
+  const LITTLE_PLANET_VS = `#version 300 es
+    layout(location = 0) in vec2 a_position;
+    out vec2 v_uv;
+    void main() {
+      v_uv = a_position * 0.5 + 0.5;
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }`;
+
+  const LITTLE_PLANET_FS = `#version 300 es
+    precision highp float;
+    in vec2 v_uv;
+    out vec4 fragColor;
+    uniform sampler2D u_tex;
+    uniform float u_zoom;
+    uniform float u_yaw;
+    uniform float u_aspect;
+    uniform float u_mirror;
+    // Watermark (nadir decal) uniforms
+    uniform float u_wmOn;
+    uniform sampler2D u_wm;
+    uniform float u_wmSize;
+    uniform float u_wmAlpha;
+    uniform float u_wmRot;
+    // Use LP_PI instead of #define PI to avoid the preprocessor expanding PI
+    // inside WM_GLSL's own const-float-PI declaration.
+    const float LP_PI = 3.14159265358979323846;
+
+    ${S360.WM_GLSL}
+
+    void main() {
+      // Normalized canvas coords in [-1, 1].
+      vec2 c_norm = (v_uv - 0.5) * 2.0;
+
+      // Projection coords (aspect-corrected, mirrored).
+      vec2 c = vec2(c_norm.x * u_aspect, c_norm.y);
+      if (u_mirror > 0.0) c.x = -c.x;
+
+      // rn: 0 at centre, 1.0 at the canvas corners (circle edge).
+      float rn = length(c) * 0.7071067811865475;
+
+      // Ease-out zoom from centre: (1-rn)^2 scaled to 50% effect.
+      // Centre gets half zoom, edges stay glued to the corners.
+      float blend = 0.5 * (1.0 - rn) * (1.0 - rn);
+      float rnZ = rn * mix(1.0, 1.0 / u_zoom, blend);
+
+      // Latitude: nadir (v=1) at centre, zenith (v=0) at circle edge.
+      float v = 1.0 - rnZ;
+
+      // Azimuth.
+      float theta = atan(c.x, -c.y);
+      float u = fract((theta + LP_PI + u_yaw) / (2.0 * LP_PI));
+
+      vec4 color = texture(u_tex, vec2(u, 1.0 - v));
+
+      // Watermark: fixed size, uses un-zoomed rn so it does not scale.
+      if (u_wmOn > 0.5) {
+        float wm_u = fract((theta + LP_PI) / (2.0 * LP_PI));
+        float wm_v = 1.0 - rn;
+        vec2 wm_uv = vec2(wm_u, 1.0 - wm_v);
+        color = vec4(s360CompositeWM(color.rgb, u_wm, wm_uv, u_wmSize, u_wmAlpha, u_wmRot), color.a);
+      }
+
+      fragColor = color;
+    }`;
+
+  // Little planet preview modal state
+  let _lpZoom = 0.5;
+  let _lpYaw = 0.0;
+  let _lpDragging = false;
+  let _lpInitialYaw = 0.0;
+  let _lpPrevAngle = 0;
+  let _lpWheelTimer = null;
+  let _lpModalRaf = null;
+  let _lpFineTimer = null;
+  let _lpCanvasSize = 600;
+  const LP_SETTLE_MS = 150;
+
 
 document.addEventListener('DOMContentLoaded', () => {
   const imageLoader     = document.getElementById('imageLoader');
@@ -117,6 +209,7 @@ document.addEventListener('DOMContentLoaded', () => {
     lfTex = lfFbo = lfTmpTex = lfTmpFbo = lfProg = null;
     glProgram = null;
     postProgram = null;
+    _littlePlanetProg = null;
     S360.viewerShared.sphereProgram = null;
     S360.viewerShared.sphere = null;
     S360.viewerShared.sphereRaf = null;
@@ -135,6 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
     S360.viewerShared.panoFullTex = null; S360.viewerShared.panoFullFbo = null; S360.viewerShared.panoFullW = 0; S360.viewerShared.panoFullH = 0;
     S360.viewerShared.panoWMTex = null; S360.viewerShared.panoWMFbo = null;
     wmTex = null; wmFbo = null; wmFboTex = null; wmFboW = 0; wmFboH = 0;
+    releaseSchematicBg(); // free the cached 2D canvas ImageBitmap from the old context
     getWmProg = getWatermarkProgram(gl);
     resetPools(gl);
     if (currentImg?.isGpuImage && currentImg.consumed) {
@@ -157,6 +251,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const actionsEl       = document.getElementById('actions');
   const downloadBtn     = document.getElementById('downloadBtn');
   const downloadJpgBtn  = document.getElementById('downloadJpgBtn');
+  const downloadLittlePlanetBtn = document.getElementById('downloadLittlePlanetBtn');
+  const lpModal = document.getElementById('lpModal');
+  const lpModalCanvas = document.getElementById('lpModalCanvas');
+  const lpCancelBtn = document.getElementById('lpCancelBtn');
+  const lpExportJpgBtn = document.getElementById('lpExportJpgBtn');
+  const lpExportPngBtn = document.getElementById('lpExportPngBtn');
   const viewModeBtn     = document.getElementById('viewModeBtn');
   const x2Btn           = document.getElementById('x2Btn');
   const schematicBtn    = document.getElementById('schematicBtn');
@@ -382,6 +482,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let framebuffer = null;
   let renderTexture = null;
+  // Tracked framebuffer binding — avoids gl.getParameter(GL_FRAMEBUFFER_BINDING)
+  // pipeline stalls in hot render paths.
+  let _boundFbo = null;
 
 
 
@@ -1108,6 +1211,98 @@ const sliderMap = [
   if (imageLoader) imageLoader.addEventListener('change', onFile, false);
   if (downloadBtn) downloadBtn.addEventListener('click', onDownloadPng, false);
   if (downloadJpgBtn) downloadJpgBtn.addEventListener('click', onDownloadJpg, false);
+  if (downloadLittlePlanetBtn) downloadLittlePlanetBtn.addEventListener('click', onDownloadLittlePlanet, false);
+  if (lpModal) {
+    lpModal.addEventListener('click', e => {
+      if (e.target === lpModal) _closeLpModal();
+    });
+  }
+  if (lpCancelBtn) {
+    lpCancelBtn.addEventListener('click', _closeLpModal);
+    lpCancelBtn.addEventListener('touchstart', e => { e.preventDefault(); _closeLpModal(); });
+  }
+  if (lpExportJpgBtn) {
+    lpExportJpgBtn.addEventListener('click', _lpDoExportJpg);
+    lpExportJpgBtn.addEventListener('touchstart', e => { e.preventDefault(); _lpDoExportJpg(); });
+    if (lpExportPngBtn) {
+      lpExportPngBtn.addEventListener('click', _lpDoExportPng);
+      lpExportPngBtn.addEventListener('touchstart', e => { e.preventDefault(); _lpDoExportPng(); });
+    }
+  }
+  if (lpModalCanvas) {
+    lpModalCanvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (_lpWheelTimer) clearTimeout(_lpWheelTimer);
+      _lpWheelTimer = setTimeout(() => { _lpWheelTimer = null; _scheduleLpPreview(); }, 300);
+      const rect = lpModalCanvas.getBoundingClientRect();
+      const relY = (e.clientY - rect.top) / rect.height;
+      const t = Math.max(0, Math.min(1, (relY - 0.4) / 0.2));
+      const invert = 1 - 2 * t;
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        _lpYaw += e.deltaX * 0.005 * invert;
+      } else {
+        const factor = e.deltaY < 0 ? 1.08 : 1 / 1.08;
+        _lpZoom *= factor;
+        _lpZoom = Math.max(0.15, Math.min(1.5, _lpZoom));
+      }
+      _updateLpPreview();
+    }, { passive: false });
+    lpModalCanvas.addEventListener('mousedown', e => {
+      _lpDragging = true;
+      const rect = lpModalCanvas.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      _lpPrevAngle = Math.atan2(e.clientX - cx, -(e.clientY - cy));
+      _lpInitialYaw = _lpYaw;
+      lpModalCanvas.style.cursor = 'grabbing';
+    });
+    window.addEventListener('mousemove', e => {
+      if (!_lpDragging) return;
+      const rect = lpModalCanvas.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const currentAngle = Math.atan2(e.clientX - cx, -(e.clientY - cy));
+      let delta = currentAngle - _lpPrevAngle;
+      if (delta > Math.PI) delta -= 2 * Math.PI;
+      if (delta < -Math.PI) delta += 2 * Math.PI;
+      _lpYaw -= delta;
+      _lpPrevAngle = currentAngle;
+      _updateLpPreview();
+    });
+    window.addEventListener('mouseup', () => {
+      if (_lpDragging) {
+        _lpDragging = false;
+        if (lpModalCanvas) lpModalCanvas.style.cursor = 'grab';
+        _scheduleLpPreview();
+      }
+    });
+    lpModalCanvas.addEventListener('touchstart', e => {
+      if (e.touches.length === 1) {
+        _lpDragging = true;
+        const rect = lpModalCanvas.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const t = e.touches[0];
+        _lpPrevAngle = Math.atan2(t.clientX - cx, -(t.clientY - cy));
+        _lpInitialYaw = _lpYaw;
+      }
+    }, { passive: true });
+    lpModalCanvas.addEventListener('touchmove', e => {
+      if (!_lpDragging || e.touches.length !== 1) return;
+      const rect = lpModalCanvas.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const t = e.touches[0];
+      const currentAngle = Math.atan2(t.clientX - cx, -(t.clientY - cy));
+      let delta = currentAngle - _lpPrevAngle;
+      if (delta > Math.PI) delta -= 2 * Math.PI;
+      if (delta < -Math.PI) delta += 2 * Math.PI;
+      _lpYaw -= delta;
+      _lpPrevAngle = currentAngle;
+      _updateLpPreview();
+    }, { passive: true });
+    lpModalCanvas.addEventListener('touchend', () => { _lpDragging = false; _scheduleLpPreview(); });
+  }
   if (exportProfileBtn) exportProfileBtn.addEventListener('click', () => {
     const profile = S360.settings.createCalibrationProfile(cfg);
     const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' });
@@ -1265,7 +1460,8 @@ const sliderMap = [
       const { w, h } = clampToGpuLimits(gl, fullW0, fullH0);
       const needRealloc = !renderTexture ||
                           renderTexture.width !== w ||
-                          renderTexture.height !== h;
+                          renderTexture.height !== h ||
+                          !gl.isTexture(renderTexture);
       if (needRealloc) { markStitchDirty(); }
       stitchIfNeeded(w, h, true);
       S360.viewerShared.panoFullDirty = true;
@@ -1528,6 +1724,7 @@ const sliderMap = [
   // orientation the sphere/export expect (north pole at the top of the FBO, see
   // readFboToCanvas()'s flip). Used when isStitched is true.
   let copyProgram = null;
+  let _littlePlanetProg = null;
   function copyStitched(panoW, panoH, targetFbo) {
     if (!copyProgram) {
       copyProgram = createProgram(gl, COPY_VS, COPY_FS);
@@ -1547,7 +1744,7 @@ const sliderMap = [
   // Re-stitches the source into the offscreen FBO only when geometry/lens/size
   // changed, so cheap post-processing passes never pay for a full re-stitch.
   function stitchIfNeeded(panoW, panoH, forceNormal = false) {
-     const needRealloc = !renderTexture || renderTexture.width !== panoW || renderTexture.height !== panoH;
+     const needRealloc = !renderTexture || renderTexture.width !== panoW || renderTexture.height !== panoH || !gl.isTexture(renderTexture);
      if (needRealloc || !_fboValid || _stitchDirty) {
        if (needRealloc) allocateStitchTarget(panoW, panoH);
        // Rebuild the LF (low-frequency blur) texture if it was shed by the memory
@@ -1564,8 +1761,9 @@ const sliderMap = [
   function renderWithPostProcessing(panoW, panoH, targetFbo = null, forceNormal = false) {
     stitchIfNeeded(panoW, panoH, forceNormal);
 
-    const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const prevFb = _boundFbo;
     gl.bindFramebuffer(gl.FRAMEBUFFER, targetFbo);
+    _boundFbo = targetFbo;
     gl.viewport(0, 0, panoW, panoH);
 
     if (!postProgram) {
@@ -1614,6 +1812,7 @@ const sliderMap = [
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    _boundFbo = prevFb;
   }
 
   // -------------------------------------------------------------------------
@@ -1808,7 +2007,8 @@ const sliderMap = [
     updateWelcome();
   }
 
-
+  // Cached lens-basis vectors — only recomputed when roll angles change.
+  let _cachedRollL = null, _cachedRollR = null, _cachedLb = null, _cachedRb = null;
 
   function stitchWebGL(srcW, srcH, panoW, panoH, renderTarget = null, forceNormal = false) {
     if (!glProgram) {
@@ -1854,8 +2054,9 @@ const sliderMap = [
     // Bind VAO once — includes quad vertex data
     gl.bindVertexArray(getQuadVAO(gl));
 
-    const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const prevFb = _boundFbo;
     gl.bindFramebuffer(gl.FRAMEBUFFER, renderTarget ? framebuffer : null);
+    _boundFbo = renderTarget ? framebuffer : null;
 
     // Bind textures to units
     gl.activeTexture(gl.TEXTURE0);
@@ -1883,19 +2084,26 @@ const sliderMap = [
 
     const AXIS_R = [1,0,0], AXIS_L = [-1,0,0];
     const UP = [0,0,1], RIGHT = [0,1,0];
-    const rotateAroundAxis = S360.rotateAroundAxis;
-    function lensBasis(isRight) {
-      const AXIS = isRight ? AXIS_R : AXIS_L;
-      let up = [...UP];
-      let right = isRight ? [...RIGHT] : [0,-1,0];
-      const totalRoll = (isRight ? cfg.rollDeg.right : cfg.rollDeg.left) * Math.PI / 180.0;
-      if (totalRoll !== 0) {
-        up = rotateAroundAxis(up, AXIS, totalRoll);
-        right = rotateAroundAxis(right, AXIS, totalRoll);
+    // Use cached basis vectors when roll hasn't changed (avoids array
+    // allocation and Rodrigues rotation on every frame).
+    const rollL = cfg.rollDeg.left, rollR = cfg.rollDeg.right;
+    if (rollL !== _cachedRollL || rollR !== _cachedRollR) {
+      const rotateAroundAxis = S360.rotateAroundAxis;
+      function makeBasis(isRight) {
+        const AXIS = isRight ? AXIS_R : AXIS_L;
+        let up = [...UP];
+        let right = isRight ? [...RIGHT] : [0,-1,0];
+        const totalRoll = (isRight ? rollR : rollL) * Math.PI / 180.0;
+        if (totalRoll !== 0) {
+          up = rotateAroundAxis(up, AXIS, totalRoll);
+          right = rotateAroundAxis(right, AXIS, totalRoll);
+        }
+        return { AXIS, up, right };
       }
-      return { AXIS, up, right };
+      _cachedRb = makeBasis(true); _cachedLb = makeBasis(false);
+      _cachedRollL = rollL; _cachedRollR = rollR;
     }
-    const Rb = lensBasis(true), Lb = lensBasis(false);
+    const Rb = _cachedRb, Lb = _cachedLb;
 
     gl.uniform3fv(u.u_gainR, gainR);
     // The overlay is preview-only: `forceNormal` is used by offscreen export,
@@ -1934,6 +2142,7 @@ const sliderMap = [
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     // Restore previous framebuffer so off-screen renders don't leak state.
     gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    _boundFbo = prevFb;
   }
 
   // ===========================================================================
@@ -1982,12 +2191,95 @@ let srcTex, srcFbo = framebuffer; // raw stitched result, already off-screen
       }
       compositeWatermark(gl, getWmProg, srcTex, panoW, panoH, wmFbo, wmTex, wmSize, wmAlpha, wmRotDeg);
       readFbo = wmFbo;
+      srcTex = wmFboTex;
     }
 
     // Read the finished full-resolution output off-screen in horizontal bands
     // (tiles) rather than one giant panoW*panoH*4 allocation - that single block
     // is the typical OOM / context-loss trigger for very large (2x, 8K+) exports.
     return S360.readFboToCanvas(gl, readFbo, panoW, panoH);
+  }
+
+  function renderLittlePlanetPixels(panoW, panoH, outW, outH, zoom, yaw, mirror) {
+    stitchIfNeeded(panoW, panoH, true);
+
+    let srcTex = renderTexture;
+    let readFbo = framebuffer;
+
+    if (postEnabled) {
+      const pooled = getPooledPostFBO(gl, panoW, panoH);
+      renderWithPostProcessing(panoW, panoH, pooled.fbo, true);
+      readFbo = pooled.fbo;
+      srcTex = pooled.tex;
+    }
+
+    // Watermark is now composited inside the little planet shader (yaw-free
+    // UVs keep the decal centred at the nadir regardless of rotation), so
+    // the old pre-shader compositeWatermark() call is no longer needed here.
+
+    const maxDim = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_VIEWPORT_DIMS)[0]);
+    const size = Math.min(outW || Math.round((panoW + panoH) / 1.5), maxDim);
+    const aspect = outW ? (outW / Math.max(1, outH)) : 1.0;
+
+    if (!_littlePlanetProg) {
+      _littlePlanetProg = createProgram(gl, LITTLE_PLANET_VS, LITTLE_PLANET_FS);
+    }
+
+    const lpEntry = getPooledFBO(gl, size, size);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lpEntry.fbo);
+    gl.viewport(0, 0, size, size);
+    gl.useProgram(_littlePlanetProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1i(gl.getUniformLocation(_littlePlanetProg, 'u_tex'), 0);
+    if (_littlePlanetProg._uZoom === undefined) {
+      _littlePlanetProg._uZoom = gl.getUniformLocation(_littlePlanetProg, 'u_zoom');
+      _littlePlanetProg._uYaw = gl.getUniformLocation(_littlePlanetProg, 'u_yaw');
+      _littlePlanetProg._uAspect = gl.getUniformLocation(_littlePlanetProg, 'u_aspect');
+      _littlePlanetProg._uMirror = gl.getUniformLocation(_littlePlanetProg, 'u_mirror');
+      _littlePlanetProg._uWmOn = gl.getUniformLocation(_littlePlanetProg, 'u_wmOn');
+      _littlePlanetProg._uWm = gl.getUniformLocation(_littlePlanetProg, 'u_wm');
+      _littlePlanetProg._uWmSize = gl.getUniformLocation(_littlePlanetProg, 'u_wmSize');
+      _littlePlanetProg._uWmAlpha = gl.getUniformLocation(_littlePlanetProg, 'u_wmAlpha');
+      _littlePlanetProg._uWmRot = gl.getUniformLocation(_littlePlanetProg, 'u_wmRot');
+    }
+    gl.uniform1f(_littlePlanetProg._uZoom, zoom || 1.0);
+    gl.uniform1f(_littlePlanetProg._uYaw, yaw || 0.0);
+    gl.uniform1f(_littlePlanetProg._uAspect, aspect);
+    gl.uniform1f(_littlePlanetProg._uMirror, mirror ? -1.0 : 1.0);
+    // Watermark uniforms — the shader composites the decal at yaw-free UVs
+    // so it stays centred at the nadir regardless of rotation.
+    if (wmLoaded && wmTex) {
+      gl.uniform1f(_littlePlanetProg._uWmOn, 1.0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, wmTex);
+      gl.uniform1i(_littlePlanetProg._uWm, 1);
+      gl.uniform1f(_littlePlanetProg._uWmSize, wmSize);
+      gl.uniform1f(_littlePlanetProg._uWmAlpha, wmAlpha);
+      gl.uniform1f(_littlePlanetProg._uWmRot, wmRotDeg * Math.PI / 180.0);
+    } else {
+      gl.uniform1f(_littlePlanetProg._uWmOn, 0.0);
+    }
+    gl.bindVertexArray(S360.getQuadVAO(gl));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // Read back WITHOUT the vertical flip that readFboToCanvas applies.
+    // The little planet shader already outputs in canvas orientation (the
+    // flip would rotate the result 180 degrees).
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx2d = canvas.getContext('2d');
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lpEntry.fbo);
+    const rowBytes = size * 4;
+    for (let y = 0; y < size; y += 1024) {
+      const th = Math.min(1024, size - y);
+      const pixels = new Uint8Array(rowBytes * th);
+      gl.readPixels(0, y, size, th, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      ctx2d.putImageData(new ImageData(new Uint8ClampedArray(pixels), size, th), 0, y);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return canvas;
   }
 
 
@@ -2037,6 +2329,132 @@ let srcTex, srcFbo = framebuffer; // raw stitched result, already off-screen
     }
   }
 
+  function _sizeLpCanvas() {
+    if (!lpModalCanvas) return;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const size = Math.max(200, Math.floor(Math.min(vw * 0.9, vh * 0.9)));
+    _lpCanvasSize = size;
+    lpModalCanvas.width = size;
+    lpModalCanvas.height = size;
+  }
+
+  async function onDownloadLittlePlanet() {
+    if (!currentImg) return;
+    _lpZoom = 0.25;
+    _lpYaw = 0.0;
+    _lpDragging = false;
+    if (lpModal) lpModal.classList.remove('hidden');
+    _sizeLpCanvas();
+    _scheduleLpPreview();
+  }
+
+  // Progressive rendering for the little planet modal, mirroring the main view's
+  // pattern: coarse pass stitches at 1/4 source res for instant feedback during
+  // interaction; fine pass stitches at full source res after a short settle delay.
+  // Both passes output at display size (_lpCanvasSize) — the GPU's bilinear
+  // filtering produces a clean upscale of the coarse stitch at near-zero cost.
+  const LP_COARSE_DIV = 4;
+
+  function _renderLpPreview(highRes = false) {
+    if (!lpModalCanvas || !currentImg) return;
+    const fullW = currentImg.width;
+    const fullH = Math.round(fullW / 2);
+    const s = _lpCanvasSize;
+    if (highRes) {
+      // Fine pass: stitch at full source res, render at 2× display size for
+      // supersampled anti-aliasing, then downscale to the canvas via drawImage
+      // which applies bilinear filtering — eliminates the pixellation artefacts
+      // caused by the little planet's non-linear projection sampling.
+      const hq = s * 2;
+      const canvas = renderLittlePlanetPixels(fullW, fullH, hq, hq, _lpZoom, _lpYaw, cfg.mirror3D);
+      const ctx2d = lpModalCanvas.getContext('2d');
+      ctx2d.drawImage(canvas, 0, 0, s, s);
+    } else {
+      // Coarse pass: stitch at 1/4 source res (1/16th the pixels) for instant
+      // feedback, then upscale to display size via canvas drawImage.
+      const cw = Math.max(256, Math.round(fullW / LP_COARSE_DIV));
+      const ch = Math.round(cw / 2);
+      const canvas = renderLittlePlanetPixels(cw, ch, s, s, _lpZoom, _lpYaw, cfg.mirror3D);
+      const ctx2d = lpModalCanvas.getContext('2d');
+      ctx2d.drawImage(canvas, 0, 0, s, s);
+    }
+  }
+
+  function _closeLpModal() {
+    if (lpModal) lpModal.classList.add('hidden');
+    if (_lpModalRaf) { cancelAnimationFrame(_lpModalRaf); _lpModalRaf = null; }
+    if (_lpFineTimer) { clearTimeout(_lpFineTimer); _lpFineTimer = null; }
+    if (_lpWheelTimer) { clearTimeout(_lpWheelTimer); _lpWheelTimer = null; }
+  }
+
+  function _scheduleLpPreview() {
+    _updateLpPreview();
+  }
+
+  function _updateLpPreview() {
+    if (_lpModalRaf) return;
+    _lpModalRaf = requestAnimationFrame(() => {
+      _lpModalRaf = null;
+      _renderLpPreview(false);
+    });
+    if (_lpFineTimer) clearTimeout(_lpFineTimer);
+    _lpFineTimer = setTimeout(() => {
+      _lpFineTimer = null;
+      _renderLpPreview(true);
+    }, LP_SETTLE_MS);
+  }
+
+  async function _lpDoExportJpg() {
+    if (!currentImg) return;
+    try {
+      if (downloadBtn) downloadBtn.disabled = true;
+      if (downloadJpgBtn) downloadJpgBtn.disabled = true;
+      _shedNonEssentials(gl, 0);
+      const fullW = currentImg.width;
+      const fullH = Math.round(fullW / 2);
+      const size = scaleValue === 2 ? Math.round(fullW / 2) : fullW;
+      const exportCanvas = renderLittlePlanetPixels(fullW, fullH, size, size, _lpZoom, _lpYaw, cfg.mirror3D);
+      const blob = await new Promise((resolve, reject) => {
+        exportCanvas.toBlob(b => b ? resolve(b) : reject(new Error('Export failed')), 'image/jpeg', 0.92);
+      });
+      triggerDownload(blob, `${lastBaseName}-little-planet.jpg`);
+    } catch (err) {
+      console.error(err);
+      alert('Download failed: ' + (err?.message || err));
+    } finally {
+      if (downloadBtn) downloadBtn.disabled = false;
+      if (downloadJpgBtn) downloadJpgBtn.disabled = false;
+      _closeLpModal();
+      renderPano();
+    }
+  }
+
+  async function _lpDoExportPng() {
+    if (!currentImg) return;
+    try {
+      if (downloadBtn) downloadBtn.disabled = true;
+      if (downloadJpgBtn) downloadJpgBtn.disabled = true;
+      _shedNonEssentials(gl, 0);
+      const fullW = currentImg.width;
+      const fullH = Math.round(fullW / 2);
+      const size = scaleValue === 2 ? Math.round(fullW / 2) : fullW;
+      const exportCanvas = renderLittlePlanetPixels(fullW, fullH, size, size, _lpZoom, _lpYaw, cfg.mirror3D);
+      const blob = await new Promise((resolve, reject) => {
+        exportCanvas.toBlob(b => b ? resolve(b) : reject(new Error('Export failed')), 'image/png');
+      });
+      triggerDownload(blob, `${lastBaseName}-little-planet.png`);
+    } catch (err) {
+      console.error(err);
+      alert('Download failed: ' + (err?.message || err));
+    } finally {
+      if (downloadBtn) downloadBtn.disabled = false;
+      if (downloadJpgBtn) downloadJpgBtn.disabled = false;
+      _closeLpModal();
+      renderPano();
+    }
+  }
+
   function triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.body.appendChild(document.createElement('a'));
@@ -2044,7 +2462,7 @@ let srcTex, srcFbo = framebuffer; // raw stitched result, already off-screen
     a.download = filename;
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
 

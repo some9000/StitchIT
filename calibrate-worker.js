@@ -7,6 +7,10 @@ const PI = Math.PI;
 const TAU = PI * 2;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+// NOTE: The following functions are copies of the canonical versions in
+// geometry.js.  Workers cannot import scripts, so they must be self-contained.
+// When editing these functions, update ALL copies and this comment.
+
 function rotateAroundAxis(v, axis, angle) {
   const c = Math.cos(angle), s = Math.sin(angle);
   const [ax, ay, az] = axis;
@@ -169,16 +173,20 @@ self.onmessage = function(e) {
       let bestCost = evalRegCost(proxy, imgWidth, imgHeight, localCfg, orig);
 
       for (let pass = 0; pass < 3; pass++) {
+        let passImproved = false;
         for (const { p, d } of params) {
           const origVal = g(localCfg, p);
           let bestVal = origVal;
           for (const delta of d) {
             s(localCfg, p, origVal + delta);
             const cost = evalRegCost(proxy, imgWidth, imgHeight, localCfg, orig);
-            if (cost < bestCost) { bestCost = cost; bestVal = origVal + delta; }
+            if (cost < bestCost) { bestCost = cost; bestVal = origVal + delta; passImproved = true; }
           }
           s(localCfg, p, bestVal);
         }
+        // Early exit: if no parameter improved in this full pass, further
+        // passes won't either — the coordinate descent has converged.
+        if (!passImproved) break;
       }
 
       self.postMessage({

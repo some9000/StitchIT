@@ -8,6 +8,10 @@ const PI = Math.PI;
 const TAU = PI * 2;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+// NOTE: The following functions are copies of the canonical versions in
+// geometry.js.  Workers cannot import scripts, so they must be self-contained.
+// When editing these functions, update ALL copies and this comment.
+
 function rotateAroundAxis(v, axis, angle) {
   const c = Math.cos(angle), s = Math.sin(angle);
   const [ax, ay, az] = axis;
@@ -167,7 +171,9 @@ function analyzeSeam(proxy, imgWidth, imgHeight, cfg, gain) {
 
   let bestScore = Infinity, bestPath = null;
   const baseSmoothness = 0.020;
+  const minCostLast = (() => { let m = Infinity; for (let l = 0; l < levels; l++) if (costs[angles - 1][l] < m) m = costs[angles - 1][l]; return m; })();
   for (let start = 0; start < levels; start++) {
+    if (costs[0][start] >= bestScore) continue;
     let previous = new Float64Array(levels); previous.fill(Infinity);
     previous[start] = costs[0][start];
     const parents = Array.from({ length: angles }, () => new Int16Array(levels));
@@ -191,8 +197,13 @@ function analyzeSeam(proxy, imgWidth, imgHeight, cfg, gain) {
         next[level] += costs[a][level];
       }
       previous = next;
+      if (a === angles - 2) {
+        let runMin = Infinity;
+        for (let l = 0; l < levels; l++) if (previous[l] < runMin) runMin = previous[l];
+        if (runMin + minCostLast >= bestScore) { previous = null; break; }
+      }
     }
-    for (let end = 0; end < levels; end++) {
+    if (previous) for (let end = 0; end < levels; end++) {
       const score = previous[end] + baseSmoothness * (end - start) * (end - start);
       if (score >= bestScore) continue;
       const path = new Int16Array(angles);

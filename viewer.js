@@ -196,13 +196,13 @@ window.S360 = window.S360 || {};
      S._listenersAttached = true;
 
      let dragging = false, lx = 0, ly = 0;
-    const onDown = (x, y) => {
-      if (ctx.getViewMode() !== '3d') return;
-      dragging = true; lx = x; ly = y; panoramaCanvas.style.cursor = 'grabbing';
-    };
-    const onMove = (x, y) => {
-      if (!dragging || ctx.getViewMode() !== '3d') return;
-      const dx = x - lx, dy = y - ly;
+     const onDown = (x, y) => {
+       if (ctx.getViewMode() !== '3d') return;
+       dragging = true; lx = x; ly = y; panoramaCanvas.style.cursor = 'grabbing';
+     };
+     const onMove = (x, y) => {
+       if (!dragging || ctx.getViewMode() !== '3d') return;
+       const dx = x - lx, dy = y - ly;
       lx = x; ly = y;
       const k = s.fov / Math.max(1, panoramaCanvas.clientHeight);
       // Grab-style panning: dragging right pulls the panorama right (scene
@@ -211,8 +211,8 @@ window.S360 = window.S360 || {};
       s.pitch = Math.max(-1.4, Math.min(1.4, s.pitch + dy * k));
       S360.renderSphere(ctx);
     };
-    const onUp = () => {
-      dragging = false;
+     const onUp = () => {
+       dragging = false;
       if (ctx.updateCanvasCursor) ctx.updateCanvasCursor();
       else panoramaCanvas.style.cursor = 'grab';
     };
@@ -220,19 +220,19 @@ window.S360 = window.S360 || {};
     panoramaCanvas.addEventListener('mousedown', e => onDown(e.clientX, e.clientY));
     window.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
     window.addEventListener('mouseup', onUp);
-    panoramaCanvas.addEventListener('wheel', e => {
-      e.preventDefault();
-      s.fov *= (1 + Math.sign(e.deltaY) * 0.1);
+     panoramaCanvas.addEventListener('wheel', e => {
+       e.preventDefault();
+       s.fov *= (1 + Math.sign(e.deltaY) * 0.1);
       s.fov = Math.max(0.35, Math.min(2.2, s.fov));
       S360.renderSphere(ctx);
     }, { passive: false });
-    panoramaCanvas.addEventListener('touchstart', e => {
-      if (e.touches.length === 1) onDown(e.touches[0].clientX, e.touches[0].clientY);
-    }, { passive: true });
-    panoramaCanvas.addEventListener('touchmove', e => {
-      if (e.touches.length === 1) onMove(e.touches[0].clientX, e.touches[0].clientY);
-    }, { passive: true });
-    panoramaCanvas.addEventListener('touchend', onUp);
+     panoramaCanvas.addEventListener('touchstart', e => {
+       if (e.touches.length === 1) onDown(e.touches[0].clientX, e.touches[0].clientY);
+     }, { passive: true });
+     panoramaCanvas.addEventListener('touchmove', e => {
+       if (e.touches.length === 1) onMove(e.touches[0].clientX, e.touches[0].clientY);
+     }, { passive: true });
+     panoramaCanvas.addEventListener('touchend', onUp);
 
     return s;
   };

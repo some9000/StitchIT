@@ -5,17 +5,8 @@ window.S360 = window.S360 || {};
   const TAU = PI * 2;
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-  // rotateAroundAxis lives on S360 — shared with stitcher.js.
-
-  function lensBasis(isRight, cfg) {
-    const axis = isRight ? [1, 0, 0] : [-1, 0, 0];
-    const roll = (isRight ? cfg.rollDeg.right : cfg.rollDeg.left) * PI / 180;
-    return {
-      axis,
-      up: S360.rotateAroundAxis([0, 0, 1], axis, roll),
-      right: S360.rotateAroundAxis(isRight ? [0, 1, 0] : [0, -1, 0], axis, roll)
-    };
-  }
+  // lensBasis, sourcePoint, sampleBilinear, distanceTransformQuadratic are
+  // defined in geometry.js (S360 namespace).  Workers keep their own copies.
 
   function makeProxy(img, maxWidth) {
     // Dynamic proxy resolution: scale up to 1920 px for large sources so the
@@ -34,90 +25,20 @@ window.S360 = window.S360 || {};
 
   S360.makeProxy = makeProxy;
 
-  function sampleBilinear(proxy, x, y) {
-    x = clamp(x, 0, proxy.w - 1); y = clamp(y, 0, proxy.h - 1);
-    const x0 = Math.floor(x), y0 = Math.floor(y);
-    const x1 = Math.min(proxy.w - 1, x0 + 1), y1 = Math.min(proxy.h - 1, y0 + 1);
-    const tx = x - x0, ty = y - y0, d = proxy.data;
-    const at = (xx, yy, c) => d[(yy * proxy.w + xx) * 4 + c] / 255;
-    const out = [0, 0, 0];
-    for (let c = 0; c < 3; c++) {
-      const a = at(x0, y0, c) * (1 - tx) + at(x1, y0, c) * tx;
-      const b = at(x0, y1, c) * (1 - tx) + at(x1, y1, c) * tx;
-      out[c] = a * (1 - ty) + b * ty;
-    }
-    return out;
-  }
-
-  function sourcePoint(v, basis, center, radius, halfFov, focal, heightL, heightR, centerOffL, centerOffR, srcH) {
-    const dot = clamp(v[0] * basis.axis[0] + v[1] * basis.axis[1] + v[2] * basis.axis[2], -1, 1);
-    const theta = Math.acos(dot);
-    if (theta > halfFov) return null;
-    const vu = v[0] * basis.up[0] + v[1] * basis.up[1] + v[2] * basis.up[2];
-    const vr = v[0] * basis.right[0] + v[1] * basis.right[1] + v[2] * basis.right[2];
-    const az = Math.atan2(vr, vu);
-    const dist = focal * theta;
-    const ht = (Math.sin(az) + 1) * 0.5;
-    const hf = heightL * (1 - ht) + heightR * ht;
-    // Power curve: centre barely moves, edges move most.
-    const rawL = Math.max(0, 1 - 2 * ht);
-    const rawR = Math.max(0, 2 * ht - 1);
-    const wL = rawL * rawL * rawL;
-    const wR = rawR * rawR * rawR;
-    const co = (centerOffL * wL + centerOffR * wR) * srcH * 0.01;
-    // Radial falloff: zero at lens centre, grows quadratically toward edge.
-    const radialFade = (theta / halfFov);
-    const dx = dist * Math.sin(az), dy = -dist * Math.cos(az) / hf + co * radialFade * radialFade;
-    if (dx * dx + dy * dy > radius * radius) return null;
-    return { x: center[0] + dx, y: center[1] + dy };
-  }
+  // Preallocated buffer for bilinear samples — avoids per-call GC in hot loops.
+  const _sampleBuf = [0, 0, 0];
 
   function luma(c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; }
 
   function gradient(proxy, point) {
     // Sobel edge detector — 3×3 kernel gives directional gradient magnitude.
-    // Much more stable than the old 2-tap difference and correctly identifies
-    // edge strength regardless of orientation.
-    const sample = (dx, dy) => luma(sampleBilinear(proxy, point.x + dx, point.y + dy));
+    const sample = (dx, dy) => luma(S360.sampleBilinear(proxy, point.x + dx, point.y + dy, _sampleBuf));
     const tl = sample(-1, -1), t = sample(0, -1), tr = sample(1, -1);
     const ml = sample(-1,  0),                    mr = sample(1,  0);
     const bl = sample(-1,  1), b = sample(0,  1), br = sample(1,  1);
     const gx = -tl - 2*ml - bl + tr + 2*mr + br;
     const gy = -tl - 2*t  - tr + bl + 2*b  + br;
     return Math.sqrt(gx * gx + gy * gy);
-  }
-
-  function distanceTransformQuadratic(f, s, argmin) {
-    const n = f.length;
-    const d = new Float64Array(n);
-    const v = new Int32Array(n);
-    const z = new Float64Array(n + 1);
-
-    let k = 0;
-    v[0] = 0;
-    z[0] = -Infinity;
-    z[1] = Infinity;
-
-    for (let q = 1; q < n; q++) {
-      let sVal = (f[q] - f[v[k]]) / (2 * s * (q - v[k])) + (q + v[k]) / 2;
-      while (sVal <= z[k]) {
-        k--;
-        sVal = (f[q] - f[v[k]]) / (2 * s * (q - v[k])) + (q + v[k]) / 2;
-      }
-      k++;
-      v[k] = q;
-      z[k] = sVal;
-      z[k + 1] = Infinity;
-    }
-
-    k = 0;
-    for (let q = 0; q < n; q++) {
-      while (z[k + 1] < q) k++;
-      d[q] = s * (q - v[k]) * (q - v[k]) + f[v[k]];
-      if (argmin) argmin[q] = v[k];
-    }
-
-    return d;
   }
 
   // Finds a smooth closed path through the overlap belt. The result is one
@@ -140,7 +61,7 @@ window.S360 = window.S360 || {};
       left: [img.width * cfg.centers.left[0] * scale, img.height * cfg.centers.left[1] * scale],
       right: [img.width * cfg.centers.right[0] * scale, img.height * cfg.centers.right[1] * scale]
     };
-    const left = lensBasis(false, cfg), right = lensBasis(true, cfg);
+    const left = S360.lensBasis(false, cfg), right = S360.lensBasis(true, cfg);
     // Higher resolution: 512 azimuth samples (was 256) × 48 theta levels (was
     // 28).  The proxy is small enough that this stays under 100 ms on mobile.
     const angles = 512, levels = 48;
@@ -159,13 +80,13 @@ window.S360 = window.S360 || {};
           left.axis[1] * cosTheta + left.up[1] * sinTheta * Math.cos(az) + left.right[1] * sinTheta * Math.sin(az),
           left.axis[2] * cosTheta + left.up[2] * sinTheta * Math.cos(az) + left.right[2] * sinTheta * Math.sin(az)
         ];
-        const pL = sourcePoint(v, left, centers.left, radius, halfFov, focal,
+        const pL = S360.sourcePoint(v, left, centers.left, radius, halfFov, focal,
           cfg.height.ll / 100, cfg.height.lr / 100, cfg.centerOffset.ll, cfg.centerOffset.lr, img.height);
-        const pR = sourcePoint(v, right, centers.right, radius, halfFov, focal,
+        const pR = S360.sourcePoint(v, right, centers.right, radius, halfFov, focal,
           cfg.height.rl / 100, cfg.height.rr / 100, cfg.centerOffset.rl, cfg.centerOffset.rr, img.height);
         if (!pL || !pR) { costs[a][level] = 1e6; continue; }
-        const cL = sampleBilinear(proxy, pL.x, pL.y);
-        const rawR = sampleBilinear(proxy, pR.x, pR.y);
+        const cL = S360.sampleBilinear(proxy, pL.x, pL.y);
+        const rawR = S360.sampleBilinear(proxy, pR.x, pR.y);
         const cR = [rawR[0] * gain[0], rawR[1] * gain[1], rawR[2] * gain[2]];
         // Perceptual colour distance (simplified CIE 76): weight blue less
         // because the human eye is less sensitive to blue detail.
@@ -189,7 +110,13 @@ window.S360 = window.S360 || {};
 
     let bestScore = Infinity, bestPath = null;
     const baseSmoothness = 0.020;
+    // Precompute the minimum possible remaining cost (from the last azimuth)
+    // to enable branch-and-bound pruning across starting levels.
+    const minCostLast = (() => { let m = Infinity; for (let l = 0; l < levels; l++) if (costs[angles - 1][l] < m) m = costs[angles - 1][l]; return m; })();
     for (let start = 0; start < levels; start++) {
+      // Pruning: if the seed cost alone already exceeds the best known
+      // total, this starting level cannot win — skip the entire forward pass.
+      if (costs[0][start] >= bestScore) continue;
       let previous = new Float64Array(levels); previous.fill(Infinity);
       previous[start] = costs[0][start];
       const parents = Array.from({ length: angles }, () => new Int16Array(levels));
@@ -208,7 +135,7 @@ window.S360 = window.S360 || {};
           }
         } else {
           const argmin = parents[a];
-          const dt = distanceTransformQuadratic(previous, localSmooth, argmin);
+          const dt = S360.distanceTransformQuadratic(previous, localSmooth, argmin);
           for (let level = 0; level < levels; level++) {
             next[level] = dt[level];
           }
@@ -217,8 +144,15 @@ window.S360 = window.S360 || {};
           next[level] += costs[a][level];
         }
         previous = next;
+        // Mid-pass pruning: if even the cheapest level at this azimuth
+        // already exceeds the best total, abandon this starting level.
+        if (a === angles - 2) {
+          let runMin = Infinity;
+          for (let l = 0; l < levels; l++) if (previous[l] < runMin) runMin = previous[l];
+          if (runMin + minCostLast >= bestScore) { previous = null; break; }
+        }
       }
-      for (let end = 0; end < levels; end++) {
+      if (previous) for (let end = 0; end < levels; end++) {
         const score = previous[end] + baseSmoothness * (end - start) * (end - start);
         if (score >= bestScore) continue;
         const path = new Int16Array(angles);

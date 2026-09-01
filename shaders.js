@@ -228,13 +228,17 @@ window.S360 = window.S360 || {};
   }
 
   vec4 sampleSource(vec2 pixelCoord) {
-      vec2 texCoord = vec2(pixelCoord.x / u_srcSize.x, 1.0 - (pixelCoord.y / u_srcSize.y));
-      return texture(u_image, texCoord);
+      // Wrap horizontally so left/right edges of the equirect seam are seamless;
+      // clamp vertically to the valid [0, srcHeight] range.
+      float u = fract(pixelCoord.x / u_srcSize.x);
+      float v = 1.0 - clamp(pixelCoord.y / u_srcSize.y, 0.0, 1.0);
+      return texture(u_image, vec2(u, v));
   }
 
   vec3 sampleSourceLF(vec2 pixelCoord) {
-      vec2 texCoord = vec2(pixelCoord.x / u_srcSize.x, 1.0 - (pixelCoord.y / u_srcSize.y));
-      return texture(u_imageLF, texCoord).rgb;
+      float u = fract(pixelCoord.x / u_srcSize.x);
+      float v = 1.0 - clamp(pixelCoord.y / u_srcSize.y, 0.0, 1.0);
+      return texture(u_imageLF, vec2(u, v)).rgb;
   }
 
   float sdCircle(vec2 p, vec2 c, float r) {

@@ -5,7 +5,10 @@ window.S360 = window.S360 || {};
 
   // Probe whether the current driver supports dynamically-indexed sampler arrays
   // in fragment shaders.  Returns true if a test shader compiles and links.
+  // Result is memoised after the first call.
+  let _dynamicIdxCached = null;
   function supportsDynamicSamplerIndexing(gl) {
+    if (_dynamicIdxCached !== null) return _dynamicIdxCached;
     const vs = `#version 300 es
       layout(location = 0) in vec2 a_position;
       void main() { gl_Position = vec4(a_position, 0.0, 1.0); }`;
@@ -26,7 +29,8 @@ window.S360 = window.S360 || {};
     gl.attachShader(prog, vShader); gl.attachShader(prog, fShader); gl.linkProgram(prog);
     const ok = gl.getProgramParameter(prog, gl.LINK_STATUS);
     gl.deleteProgram(prog); gl.deleteShader(vShader); gl.deleteShader(fShader);
-    return !!ok;
+    _dynamicIdxCached = !!ok;
+    return _dynamicIdxCached;
   }
 
   // Single dynamic-indexing shader for all batch sizes.  Uses a fixed maximum
@@ -340,6 +344,7 @@ window.S360 = window.S360 || {};
 
   S360.invalidateHdrPrograms = function (gl) {
       if (gl) _hdrState.delete(gl);
+      _dynamicIdxCached = null;  // re-probe after context loss
   };
 
   S360.getHdrFinalProgram = function (gl, toneMap) {
