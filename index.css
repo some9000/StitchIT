@@ -1,0 +1,1294 @@
+:root {
+    /* --- base palette (single source of truth — don't use literals in rules) --- */
+    --bg-color: #121214;
+    --card-bg: #1e1e24;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --accent-fusion: #f59e0b;
+    --accent-fusion-hover: #d97706;
+    --accent-active: #10b981;
+    --accent-active-hover: #059669;
+    --text: #e4e4e7;
+    --text-dim: #a1a1aa;
+    --text-strong: #ffffff;
+    --border: #37373a;
+    --hover-bg: #3f3f46;
+    --focus-ring: #ffdc70;
+    --chart-bg: #0e0e10;
+    --canvas-bg: #101014;
+    --thumb-green: #22c55e;
+    --thumb-pink: #ec4899;
+    /* --- typography --- */
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* --- geometry tokens --- */
+    --radius-sm: 0.25rem;
+    --radius-md: 0.5rem;
+    --radius-lg: 0.75rem;
+    --control-gap: 0.35rem;
+}
+html,
+body {
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+a {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-sm);
+    background: var(--border);
+    color: var(--text-strong);
+    font-size: 0.75rem;
+    font-weight: 700;
+    transition:
+        background 0.2s ease,
+        opacity 0.2s ease;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+/* unvisited link */
+a:link {
+  color: var(--text-strong);
+}
+
+/* visited link */
+a:visited {
+  color: var(--text-strong);
+}
+
+/* mouse over link */
+a:hover {
+  color: var(--text-strong);
+}
+
+/* selected link */
+a:active {
+  color: var(--text-strong);
+}
+
+
+/* Floating UI panel overlay */
+* {
+    margin: 0;
+    padding: 0;
+}
+body {
+    display: flex;
+    overflow: hidden;
+    flex-direction: column;
+    height: 100%;
+    min-height: 100vh;
+    background: var(--bg-color);
+    color: var(--text);
+    font-family: var(--font);
+}
+/* One font for every control — the UA default for form elements does not inherit the body face. */
+button,
+input,
+select,
+textarea,
+dialog,
+figcaption {
+    font-family: inherit;
+    color: inherit;
+}
+header {
+    display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--card-bg);
+}
+h1 {
+    font-size: 1.25rem;
+    font-weight: 700;
+}
+header h1 {
+    margin: 0;
+    font-size: 1.725rem;
+    font-weight: 800;
+    letter-spacing: -0.045em;
+    background: linear-gradient(135deg, var(--accent), var(--accent-active));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+header button {
+    padding: 0.39rem 0.65rem;
+    font-size: 0.975rem;
+}
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+}
+button,
+.btn {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-sm);
+    background: var(--border);
+    color: var(--text-strong);
+    font-size: 0.75rem;
+    font-weight: 700;
+    transition:
+        background 0.2s ease,
+        opacity 0.2s ease;
+    cursor: pointer;
+}
+button:hover {
+    background: var(--hover-bg);
+}
+button.primary {
+    background: var(--accent);
+}
+button.primary:hover {
+    background: var(--accent-hover);
+}
+button.fusion-btn {
+    background: var(--accent-fusion);
+}
+button.fusion-btn:hover {
+    background: var(--accent-fusion-hover);
+}
+button.active {
+    background: var(--accent-active);
+}
+button.active:hover {
+    background: var(--accent-active-hover);
+}
+.header-btns {
+    display: flex;
+    gap: var(--control-gap);
+}
+@keyframes btn-flash {
+    0% {
+        background: var(--accent-active);
+        color: var(--text-strong);
+    }
+    100% {
+        background: var(--border);
+    }
+}
+button.flash {
+    animation: btn-flash 0.3s ease-out;
+}
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.toggle-row button {
+    flex: 1;
+}
+.morph-ratio-row {
+    gap: 3px;
+}
+.morph-ratio-row button {
+    min-width: 0;
+    padding-left: 2px;
+    padding-right: 2px;
+    font-size: 0.72rem;
+}
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+/* The "+ Stitched" buttons sit right after their parent loader, so pull them in (negative margin cancels most of the toolbar gap) to read as a pair. Square the adjoining corners so the two read as one connected control. */
+#exposureFusionBtn,
+#blendBtn,
+#chooseBtn {
+    padding-right: 0.5rem;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}
+#exposureFusionStitchedBtn,
+#blendStitchedBtn,
+#openStitchedBtn {
+    margin-left: -0.2rem;
+    padding-left: 0.5rem;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    opacity: 0.75;
+}
+/* Open + its "+ Stitched" get the green "active" look. */
+#chooseBtn,
+#openStitchedBtn {
+    background: var(--accent-active);
+    color: var(--text-strong);
+}
+#chooseBtn:hover,
+#openStitchedBtn:hover {
+    background: var(--accent-active-hover);
+}
+.hidden {
+    display: none !important;
+}
+main {
+    position: relative;
+    display: grid;
+    overflow: hidden;
+    flex: 1;
+    grid-template-columns: 1fr 340px;
+    height: 100%;
+    min-height: 0;
+    transition: grid-template-columns 0.22s ease;
+}
+main.sidebar-collapsed {
+    grid-template-columns: 1fr;
+}
+main.sidebar-collapsed .sidebar {
+    display: none;
+}
+@media (max-width: 900px) {
+    main {
+        grid-template-columns: 1fr;
+    }
+    .sidebar {
+        display: none;
+    }
+}
+.viewport {
+    position: relative;
+    display: flex;
+    overflow: hidden;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    background: #000;
+}
+.sidebar-toggle {
+    position: absolute;
+    top: 50%;
+    right: 340px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 4.25rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-right: 0;
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+    background: var(--card-bg);
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    transform: translateY(-50%);
+    transition: right 0.22s ease, background 0.2s ease, color 0.2s ease;
+}
+.sidebar-toggle:hover,
+.sidebar-toggle:focus-visible {
+    background: var(--accent);
+    color: var(--text-strong);
+}
+main.sidebar-collapsed .sidebar-toggle {
+    right: 0;
+}
+@media (max-width: 900px) {
+    .sidebar-toggle {
+        display: none;
+    }
+}
+canvas#panoramaCanvas {
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: 100%;
+    border-radius: 0;
+    box-shadow: none;
+    object-fit: contain;
+}
+/* In 3D mode the same canvas hosts the spherical view and should fill the viewport instead of letterboxing the equirect strip. */
+canvas#panoramaCanvas.viewer-3d {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    object-fit: fill;
+}
+#resultContainer.viewer3d.compare-active::after {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    z-index: 3;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.55);
+    content: "";
+    pointer-events: none;
+}
+#resultContainer.viewer3d.compare-active #compareLabels span:first-child {
+    color: #7dd3fc;
+}
+#resultContainer.viewer3d.compare-active #compareLabels span:last-child {
+    color: #fcd34d;
+}
+.float-btn {
+    position: absolute;
+    z-index: 5;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: var(--radius-md);
+    background: rgba(20, 20, 20, 0.7);
+    color: var(--text-strong);
+    font-size: 0.8rem;
+    font-weight: 600;
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+}
+.float-btn:hover {
+    background: rgba(40, 40, 40, 0.85);
+}
+.float-tr {
+    top: 12px;
+    right: 12px;
+}
+.float-tr2 {
+    top: 52px;
+    right: 12px;
+}
+.float-slider {
+    position: absolute;
+    top: 50%;
+    right: 16px;
+    z-index: 5;
+    display: none;
+    width: 22px;
+    height: 192px;
+    transform: translateY(-50%);
+    cursor: pointer;
+    accent-color: var(--accent);
+    direction: rtl;
+    writing-mode: vertical-lr;
+}
+.float-note {
+    position: absolute;
+    top: calc(50% + 104px);
+    right: 8px;
+    z-index: 5;
+    display: none;
+    padding: 0.1rem 0.4rem;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: var(--radius-md);
+    background: rgba(20, 20, 20, 0.7);
+    color: var(--text-strong);
+    font-size: 0.65rem;
+    pointer-events: none;
+}
+.float-col {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    z-index: 5;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+}
+.pitch-btn {
+    padding: 0.3rem 0.55rem;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: var(--radius-md);
+    background: rgba(20, 20, 20, 0.7);
+    color: var(--text-strong);
+    font-size: 0.9rem;
+    line-height: 1.1;
+    text-align: center;
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+}
+.pitch-btn:hover {
+    background: rgba(40, 40, 40, 0.85);
+}
+#resultContainer.viewer3d .float-slider {
+    display: block;
+}
+#resultContainer.viewer3d .float-note {
+    display: block;
+}
+#resultContainer.viewer3d .float-col {
+    display: flex;
+}
+.float-tl {
+    top: 12px;
+    left: 12px;
+}
+.sidebar {
+    display: flex;
+    overflow-y: auto;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.25rem;
+    border-left: 1px solid var(--border);
+    background: var(--card-bg);
+}
+/* Keep the single-column mobile layout from allocating a second grid row to the sidebar. */
+@media (max-width: 900px) {
+    .sidebar {
+        display: none;
+    }
+    .sidebar-toggle {
+        display: none;
+    }
+}
+.sidebar-console-group {
+    margin-top: auto;
+}
+.sidebar-console {
+    overflow-y: auto;
+    min-height: 0;
+    max-height: 10.5em;
+    padding: 0.35rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(9, 10, 14, 0.9);
+    color: var(--text-strong);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    word-break: break-word;
+    scrollbar-width: thin;
+}
+.sidebar-console-line {
+    padding: 0.08rem 0;
+    color: var(--text-strong);
+    opacity: 0.9;
+}
+.sidebar-console-line.warn {
+    color: #ffd166;
+}
+.sidebar-console-line.error {
+    color: #ff7b7b;
+}
+.sidebar-console-line.ok {
+    color: #7be0a1;
+}
+.control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+.control-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+/* Collapsible panels: clicking a .control-header toggles .collapsed on the group, hiding everything except the header. Buttons inside the header (Save/Load/toggles) keep working and do not toggle the panel. */
+  .control-header {
+      cursor: pointer;
+      user-select: none;
+  }
+  .control-header .header-btns {
+      display: flex;
+      gap: 0.25rem;
+  }
+  .control-header .header-btns button {
+      padding: 0.2rem 0.5rem;
+      font-size: 0.75rem;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-strong);
+      cursor: pointer;
+  }
+  .control-header .header-btns button:hover {
+      background: var(--accent);
+      color: var(--bg-color);
+  }
+  .control-header .header-btns button.active {
+      background: var(--accent-active);
+      color: var(--text-strong);
+  }
+  .control-header .header-btns button.active:hover {
+      background: var(--accent-active-hover);
+      color: var(--text-strong);
+  }
+  .control-header h3::before {
+    display: inline-block;
+    width: 0.9em;
+    margin-right: 0.35em;
+    color: var(--text-dim);
+    transition: transform 0.15s ease;
+    content: "▾";
+}
+.control-group.collapsed .control-header h3::before {
+    transform: rotate(-90deg);
+}
+/* Keep collapsed panel contents hidden even when a child has an explicit display rule. */
+.control-group.collapsed > *:not(.control-header) {
+    display: none !important;
+}
+
+.group-locked {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+.group-locked .control-header {
+    cursor: not-allowed;
+}
+.group-locked .control-header h3::before {
+    font-size: 0.7rem;
+    transform: none;
+    content: "🔒";
+}
+.control-group h3 {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+.control-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+.control-row.divider {
+    height: 1px;
+    border: none;
+    border-top: 1px dashed var(--border);
+    margin: 0.35rem 0;
+    padding: 0;
+}
+.control-row label {
+    flex: 1;
+}
+
+.control-row span {
+    width: 45px;
+    color: var(--text-dim);
+    text-align: right;
+}
+.panel-note {
+    margin: 0.15rem 0 0;
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    line-height: 1.3;
+}
+#cloneControls:not([hidden]) {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.wm-slot {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.draw-color-btn {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 50%;
+    cursor: pointer;
+}
+.draw-color-btn:hover {
+    border-color: var(--text-dim);
+}
+.draw-color-btn.active {
+    border-width: 2px;
+    border-style: solid;
+}
+#drawingControls button {
+    font-size: 0.7rem;
+}
+#drawOverlayCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 4;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+#drawOverlayCanvas.active {
+    cursor: none;
+    pointer-events: auto;
+}
+#manualHorizonCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 8;
+    cursor: none;
+    pointer-events: none;
+}
+#manualHorizonCanvas.active {
+    pointer-events: auto;
+}
+#resultContainer.viewer3d.compare-active #drawOverlayCanvas {
+    left: 50%;
+    width: 50%;
+}
+.loader-overlay {
+    position: absolute;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 0.35rem;
+    background: rgba(0, 0, 0, 0.8);
+    inset: 0;
+}
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+#drawingBusy { background: rgba(8, 10, 14, 0.45); }
+#drawingBusy p { padding: 0.4rem 0.8rem; border-radius: 6px; background: rgba(8, 10, 14, 0.85); }
+/* ---- toast notifications ---- */
+#toastContainer {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+    display: none;
+  transform: translateX(-50%);
+  z-index: 1000;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+  max-width: 90vw;
+}
+#toastContainer:not(:empty) {
+    display: flex;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+.toast-error { border-left: 4px solid #ef4444; }
+.toast-warning { border-left: 4px solid #f59e0b; }
+.toast-info { border-left: 4px solid #3b82f6; }
+.toast-success { border-left: 4px solid #22c55e; }
+.toast-text { flex: 1; line-height: 1.4; }
+.toast-retry {
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  padding: 0.3rem 0.7rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.toast-retry:hover { background: #dc2626; }
+.toast-close {
+  background: none;
+  border: none;
+  color: #71717a;
+  font-size: 1.3rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.toast-close:hover { color: #fff; }
+.toast-exit { animation: toast-out 0.3s ease-in forwards; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(12px); }
+}
+/* Coloured slider thumbs: blue = outer margin, orange = radius,
+   green = seam width + seam shift (mirrors the schematic ring colours). */
+#centerL,
+#centerR,
+#fusionContrast,
+#fusionSaturation,
+#fusionWellExposed {
+    accent-color: var(--accent-fusion);
+}
+#fusionContrast::-webkit-slider-thumb,
+#fusionSaturation::-webkit-slider-thumb,
+#fusionWellExposed::-webkit-slider-thumb {
+    background: #fff !important;
+}
+#fusionContrast::-moz-range-thumb,
+#fusionSaturation::-moz-range-thumb,
+#fusionWellExposed::-moz-range-thumb {
+    border-color: var(--accent-fusion) !important;
+    background: #fff !important;
+}
+#outerMargin {
+    accent-color: var(--accent);
+}
+#outerMargin::-webkit-slider-thumb {
+    background: #fff !important;
+}
+#outerMargin::-moz-range-thumb {
+    border-color: var(--accent) !important;
+    background: #fff !important;
+}
+#radius {
+    accent-color: var(--accent-fusion);
+}
+#radius::-webkit-slider-thumb {
+    background: #fff !important;
+}
+#radius::-moz-range-thumb {
+    border-color: var(--accent-fusion) !important;
+    background: #fff !important;
+}
+#seamWidth,
+#seamShift {
+    accent-color: var(--thumb-green);
+}
+#seamWidth::-webkit-slider-thumb,
+#seamShift::-webkit-slider-thumb {
+    background: #fff !important;
+}
+#seamWidth::-moz-range-thumb,
+#seamShift::-moz-range-thumb {
+    border-color: var(--thumb-green) !important;
+    background: #fff !important;
+}
+
+#welcomeOverlay {
+    position: absolute;
+    z-index: 5;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    pointer-events: auto;
+    inset: 0;
+    padding: 1.25rem;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.68);
+    backdrop-filter: blur(10px);
+    overflow-y: auto;
+}
+#welcomeOverlay .welcome-inner {
+    width: min(980px, 100%);
+    height: auto;
+    max-height: calc(100% - 2.5rem);
+    box-sizing: border-box;
+    overflow-y: auto;
+    margin: 0;
+    padding: 1.75rem 2rem 1.5rem;
+    background: color-mix(in srgb, var(--bg-color) 92%, var(--accent) 8%);
+    border: 1px solid color-mix(in srgb, var(--border) 75%, var(--accent) 25%);
+    border-radius: 1.25rem;
+    box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(255, 255, 255, 0.025) inset;
+    color: var(--text);
+}
+#welcomeOverlay .welcome-hero {
+    text-align: center;
+    margin-bottom: 1.35rem;
+}
+#welcomeOverlay .welcome-title {
+    font-size: clamp(2.75rem, 7vw, 4rem);
+    font-weight: 800;
+    letter-spacing: -0.055em;
+    margin: 0 0 0.1rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent-active));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+#welcomeOverlay .welcome-tagline {
+    font-size: clamp(1rem, 2vw, 1.2rem);
+    color: var(--text);
+    margin: 0 0 0.25rem;
+    font-weight: 600;
+}
+#welcomeOverlay .welcome-subtitle {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    margin: 0;
+}
+
+#welcomeOverlay .welcome-workflow {
+    margin-bottom: 1.35rem;
+    padding: 0;
+    background: transparent;
+    border: 0;
+}
+#welcomeOverlay .welcome-workflow h2 {
+    font-size: 1.1rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    text-align: center;
+    margin: 0 0 0.75rem;
+}
+#welcomeOverlay .workflow-steps {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 0.65rem;
+}
+#welcomeOverlay .workflow-step {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 6rem;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.7rem 0.8rem;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    min-width: 120px;
+}
+#welcomeOverlay .step-heading {
+    display: inline-flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 0.3rem;
+    color: var(--accent);
+    white-space: nowrap;
+}
+#welcomeOverlay .step-num {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+}
+#welcomeOverlay .step-divider {
+    color: var(--accent);
+    font-size: 1.5rem;
+    font-weight: 800;
+}
+#welcomeOverlay .step-icon {
+    font-size: 1.35rem;
+    line-height: 1;
+}
+#welcomeOverlay .step-label {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--accent);
+}
+#welcomeOverlay .step-desc {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    text-align: center;
+    line-height: 1.3;
+}
+#welcomeOverlay .workflow-arrow {
+    flex: 0 0 auto;
+    font-size: 1.5rem;
+    color: var(--accent);
+    font-weight: 300;
+}
+
+#welcomeOverlay .welcome-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.35rem;
+}
+#welcomeOverlay .welcome-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 0.85rem 0.95rem;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+#welcomeOverlay .welcome-card h3 {
+    font-size: 0.9rem;
+    color: var(--accent);
+    margin: 0 0 0.5rem;
+    text-transform: none;
+    letter-spacing: 0;
+}
+#welcomeOverlay .welcome-card ul {
+    margin: 0;
+    padding-left: 1rem;
+    list-style: none;
+}
+#welcomeOverlay .welcome-card li {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin-bottom: 0.25rem;
+}
+#welcomeOverlay .welcome-card li strong {
+    color: var(--text-strong);
+}
+
+#welcomeOverlay .welcome-tips {
+    text-align: center;
+    padding: 0.8rem 1rem;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+}
+
+@media (max-width: 680px) {
+    #welcomeOverlay {
+        align-items: flex-start;
+        padding: 0.75rem;
+    }
+    #welcomeOverlay .welcome-inner {
+        height: auto;
+        max-height: 100%;
+        margin: 0;
+        padding: 1.35rem 1rem 1rem;
+        border-radius: var(--radius-lg);
+    }
+    #welcomeOverlay .workflow-steps {
+        align-items: stretch;
+        flex-wrap: wrap;
+    }
+    #welcomeOverlay .workflow-step {
+        flex: 1 1 calc(50% - 0.65rem);
+    }
+    #welcomeOverlay .workflow-arrow {
+        display: none;
+    }
+}
+#welcomeOverlay .welcome-tips p {
+    margin: 0.25rem 0;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+#welcomeOverlay .welcome-tips p strong {
+    color: var(--text-strong);
+}
+#welcomeOverlay .welcome-tips kbd {
+    background: var(--border);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 0.85em;
+}
+.modal-overlay {
+    position: fixed;
+    z-index: 100;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin: 0;
+    padding: 0;
+    background: rgba(0, 0, 0, 0.85);
+    inset: 0;
+}
+.modal-overlay.hidden {
+    display: none;
+}
+/* Little-Planet interaction hint — a button-styled chip floating over the top of the modal, matching the bottom button row's appearance. It is decorative only: disabled + pointer-events:none keep it out of tab order and let drag/zoom/double-click events pass through to the canvas. Opacity is restored because the dimmed button:disabled look is unwanted on a purely decorative element. */
+#lpHint {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+.modal-content {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    box-sizing: border-box;
+    width: 100vw;
+    max-width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+}
+.modal-content canvas {
+    width: min(76vw, 90vh);
+    max-width: calc(100vw - 300px);
+    max-height: 96vh;
+    border-radius: var(--radius-md);
+    background: #000;
+    cursor: grab;
+    aspect-ratio: 1;
+}
+.lp-control-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.55rem;
+    box-sizing: border-box;
+    width: 230px;
+    max-height: 92vh;
+    padding: 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--card-bg);
+}
+.lp-control-panel button {
+    padding: 0.39rem 0.65rem;
+    font-size: 0.85rem;
+}
+.modal-content canvas:active {
+    cursor: grabbing;
+}
+.modal-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+/* Crop slider — now inline in the modal-buttons row. */
+#lpCropRow {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.34rem 0.65rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-sm);
+    background: var(--border);
+    font-size: 0.975rem;
+    font-weight: 600;
+}
+#lpCropRow label {
+    cursor: default;
+}
+#lpCropRow input[type="range"] {
+    width: 9rem;
+    accent-color: var(--accent);
+}
+#lpCropRow span {
+    min-width: 3.5rem;
+    font-weight: 600;
+    text-align: right;
+}
+
+/* Projection switch buttons */
+#lpProjRow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.34rem 0.65rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-sm);
+    background: var(--border);
+    font-size: 0.975rem;
+    font-weight: 600;
+}
+#lpProjRow button {
+    width: 100%;
+    background: var(--bg-color);
+}
+#lpProjRow button.active {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--bg-color);
+}
+
+/* Zenith center checkbox row */
+#lpCenterRow {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.34rem 0.65rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-sm);
+    background: var(--border);
+    font-size: 0.975rem;
+    font-weight: 600;
+}
+@media (max-width: 720px) {
+    .modal-content {
+        flex-direction: column;
+        gap: 0.5rem;
+        overflow-y: auto;
+        padding: 0.5rem;
+    }
+    .modal-content canvas {
+        width: min(94vw, 62vh);
+        max-width: 94vw;
+        max-height: 62vh;
+    }
+    .lp-control-panel {
+        width: min(94vw, 360px);
+        max-height: none;
+    }
+}
+/* --- shared control utility classes (replaces one-off inline styles) --- */
+.control-hint {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    margin-top: 0.5rem;
+}
+.header-btns {
+    display: flex;
+    gap: var(--control-gap);
+    align-items: center;
+}
+.inline-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-sm);
+    background: var(--chart-bg);
+    margin-top: var(--control-gap);
+}
+.drawing-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--control-gap);
+}
+.drawing-tools-col {
+    display: flex;
+    flex-direction: column;
+    gap: var(--control-gap);
+}
+.drawing-tools-col .control-row:has(> button:not(.draw-color-btn)) {
+    flex-wrap: wrap;
+}
+.drawing-tools-col .control-row:has(> button:not(.draw-color-btn)) > button {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    white-space: nowrap;
+}
+.drawing-3d-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(8, 10, 14, 0.97);
+    padding: 1.25rem;
+    box-sizing: border-box;
+    line-height: 1.6;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: center;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    z-index: 6;
+}
+
+.drawing-instruction {
+    position: absolute;
+    top: 1rem;
+    left: 50%;
+    z-index: 10;
+    padding: 0.39rem 0.65rem;
+    opacity: 0;
+    font-size: 0.975rem;
+    font-weight: 700;
+    transform: translateX(-50%) translateY(-10px);
+    cursor: default;
+    pointer-events: none;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-sm);
+    background: var(--border);
+    color: var(--text-strong);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    max-width: 90vw;
+    text-align: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.drawing-instruction.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+#drawOpacityRow {
+    display: flex;
+    align-items: center;
+    gap: var(--control-gap);
+}
+
+#drawOpacityRow label {
+    min-width: 55px;
+}
+
+#drawOpacityRow input {
+    flex: 1;
+}
+
+#drawOpacityRow span {
+    min-width: 45px;
+    text-align: right;
+}
+
+#cloneFeatherRow, #cloneAdaptRow {
+    display: flex;
+    align-items: center;
+    gap: var(--control-gap);
+}
+
+#cloneFeatherRow label, #cloneAdaptRow label {
+    min-width: 55px;
+}
+
+#cloneFeatherRow input, #cloneAdaptRow input {
+    flex: 1;
+}
+
+#cloneFeatherRow span, #cloneAdaptRow span {
+    min-width: 45px;
+    text-align: right;
+}
+
+#warpStrengthRow {
+    display: flex;
+    align-items: center;
+    gap: var(--control-gap);
+}
+
+#warpStrengthRow {
+    display: flex;
+    align-items: center;
+    gap: var(--control-gap);
+}
+
+#warpStrengthRow label {
+    min-width: 55px;
+}
+
+#warpStrengthRow input {
+    flex: 1;
+}
+
+#warpStrengthRow span {
+    min-width: 45px;
+    text-align: right;
+}
+
+/* HD selects source preparation for the next load. */

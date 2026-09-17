@@ -1,0 +1,13 @@
+{
+  "name": "stitchit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser-based dual-fisheye to equirectangular 360 degree stitcher. The app itself has no dependencies and runs offline from file:// (open index.html); this file only documents the development commands.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node dev-regression.cjs",
+    "smoke": "node dev-smoke.js regression",
+    "smoke:plain": "node dev-smoke.js plain",
+    "smoke:deep": "node dev-smoke.js deep"
+  }
+}

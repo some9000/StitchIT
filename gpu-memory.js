@@ -12,6 +12,7 @@
 
 window.S360 = window.S360 || {};
 (function (S360) {
+'use strict';
 
   // ---- budget estimation ----
 
@@ -47,7 +48,8 @@ window.S360 = window.S360 || {};
     /** Initialise the tracker.  Call once after getting the GL context. */
     init(gl) {
       _budget = _estimateBudget(gl);
-      console.log(`🎮 GPU memory budget estimated at ${(_budget / 1048576).toFixed(0)} MiB (MAX_TEXTURE_SIZE=${gl.getParameter(gl.MAX_TEXTURE_SIZE)})`);
+      const log = typeof S360.debugLog === 'function' ? S360.debugLog : console.log.bind(console);
+      log(`🎮 GPU memory budget estimated at ${(_budget / 1048576).toFixed(0)} MiB (MAX_TEXTURE_SIZE=${gl.getParameter(gl.MAX_TEXTURE_SIZE)})`);
     },
 
     /** Override the budget (e.g. user preference or device-specific value). */
@@ -129,26 +131,44 @@ window.S360 = window.S360 || {};
         const mb = (needed / 1048576).toFixed(0);
         const total = (this.total() / 1048576).toFixed(0);
         const bud = (this.budget() / 1048576).toFixed(0);
-        _warnCallback(`GPU memory pressure: need ${mb} MiB more (using ${total} / ${bud} MiB).  Reducing quality to prevent context loss.`);
+        _warnCallback(`GPU memory pressure: need ${mb} MiB more (using ${total} / ${bud} MiB). Clearing rebuildable caches before continuing.`);
       }
       return this.willFit(needed);
     },
 
     // ---- diagnostics ----
 
+    /** Structured snapshot for diagnostics and UI debug panels. */
+    summary() {
+      const entries = [..._entries.entries()].map(([id, e]) => ({
+        id: String(id),
+        label: e.label || id,
+        bytes: e.bytes,
+        miB: e.bytes / 1048576,
+      }));
+      const total = entries.reduce((sum, e) => sum + e.bytes, 0);
+      const headroom = Math.max(0, _budget - total);
+      return {
+        total,
+        budget: _budget,
+        headroom,
+        pressure: _budget > 0 ? total / _budget : 0,
+        count: entries.length,
+        entries: entries.sort((a, b) => b.bytes - a.bytes),
+      };
+    },
+
     /** Dump a summary table to the console. */
     log() {
       const rows = [];
-      let total = 0;
-      _entries.forEach((e, id) => {
-        rows.push({ 'Allocation': e.label || id, 'Bytes': e.bytes, 'MiB': (e.bytes / 1048576).toFixed(1) });
-        total += e.bytes;
+      const summary = this.summary();
+      summary.entries.forEach(e => {
+        rows.push({ 'Allocation': e.label, 'Bytes': e.bytes, 'MiB': e.miB.toFixed(1) });
       });
-      rows.sort((a, b) => b.Bytes - a.Bytes);
-      console.group(`🎮 GPU Memory — ${(total / 1048576).toFixed(1)} / ${(_budget / 1048576).toFixed(0)} MiB (${(total / _budget * 100).toFixed(0)}%)`);
+      console.group(`🎮 GPU Memory — ${(summary.total / 1048576).toFixed(1)} / ${(_budget / 1048576).toFixed(0)} MiB (${(summary.pressure * 100).toFixed(0)}%)`);
       console.table(rows);
       console.groupEnd();
-      return { total, budget: _budget, entries: [..._entries.entries()].map(([id, e]) => ({ id, ...e })) };
+      return summary;
     },
 
     /** Reset all tracking (call on context loss / restore). */
