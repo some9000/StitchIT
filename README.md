@@ -6,15 +6,13 @@ You can support me here, in case you would like to: https://buymeacoffee.com/som
 
 Browser-based dual-fisheye to equirectangular 360° stitcher. Processing is local: images are not uploaded to a server. WebGL2 handles the rendering pipeline, while registration, seam analysis, editing, and compatibility fallbacks also use browser workers or the main thread.
 
-<img width="3770" height="1804" alt="2026-08-30 13 25 52  6552da82205f" src="https://github.com/user-attachments/assets/7e9ce939-6778-4039-9d2b-941a745ec941" />
-
+<img width="3770" height="1804" alt="2026-09-17 10 52 08  3e3b973147cf" src="https://github.com/user-attachments/assets/bcbe93ea-fef8-471c-b487-8436441b717b" />
 
 ## What it does
 
 StitchIT takes dual-fisheye source images from 360° cameras and produces stitched equirectangular panoramas, entirely in the browser. No server, no upload, no install. You can also exposure-fuse or stack already stitched images.
 
-<img width="3770" height="1804" alt="2026-08-30 13 27 39  3b8ca7e2de80" src="https://github.com/user-attachments/assets/b3235320-f2ef-40b8-b439-72f2cc423762" />
-
+<img width="3770" height="1804" alt="2026-09-17 10 59 10 stitchit-smoky vercel app f7672af72b66" src="https://github.com/user-attachments/assets/a7cf0596-9806-43f9-9413-3be8ebf780b6" />
 
 ## Features
 
@@ -32,7 +30,7 @@ StitchIT takes dual-fisheye source images from 360° cameras and produces stitch
 - **Export** - PNG or JPG with embedded XMP metadata for 360° viewers
 - **GPU-accelerated** - WebGL shaders handle stitching, blending, and filtering at full resolution
 
-<img width="3770" height="1804" alt="2026-08-30 13 30 05  c430bfa9ff50" src="https://github.com/user-attachments/assets/46442796-6180-416f-bc0d-4bd474ac3962" />
+<img width="3770" height="1804" alt="2026-09-17 11 04 17  52ec6064b561" src="https://github.com/user-attachments/assets/8a8b6129-d822-43fa-a4dc-cac6b0a15640" />
 
 ## Getting started
 
